@@ -892,6 +892,14 @@
     background: #64748b;
 }
 
+.monitor-card-history .status-dot.not-created {
+    background: #465366;
+}
+
+.monitor-card-history .status-dot.no-data {
+    background: #5b6b7f;
+}
+
 .monitor-card-history .status-dot.maintenance i {
     color: #9ca3af;
 }

@@ -7,7 +7,7 @@ import json
 import logging
 from time import monotonic
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form
 
 from ..background.monitor_loop import handle_checkin
 from ..database import db
@@ -38,7 +38,7 @@ def _check_agent_rate_limit(sid: str) -> bool:
 
 
 @router.post("/v2/")
-async def receive_agent_data(request: Request, j: str = Form(...)):
+async def receive_agent_data(j: str = Form(...)):
     try:
         if len(j) > _MAX_PAYLOAD_BYTES:
             return {"status": "error", "message": "Payload too large"}
@@ -67,7 +67,7 @@ async def receive_agent_data(request: Request, j: str = Form(...)):
 
 
 @router.post("/win/")
-async def receive_windows_agent_data(request: Request, payload: dict):
+async def receive_windows_agent_data(payload: dict):
     try:
         version = str(payload.get("version") or "").strip().lower()
         if version in {"install", "uninstall"}:

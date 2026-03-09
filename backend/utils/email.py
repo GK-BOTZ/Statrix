@@ -29,7 +29,6 @@ _DOWN_TEMPLATE = (
     ' style="max-width:560px;width:100%;margin:0 auto;background:#ffffff;'
     'border-radius:12px;border:1px solid #e4e4e7;border-collapse:collapse;">'
 
-    # Header row
     '<tr><td style="padding:24px 36px;border-bottom:1px solid #e4e4e7;text-align:center;">'
     '<img src="{logo_url}" alt="S" width="48" height="48"'
     ' style="display:inline-block;vertical-align:middle;border-radius:50%;'
@@ -40,7 +39,6 @@ _DOWN_TEMPLATE = (
     'Statrix</a>'
     '</td></tr>'
 
-    # Content row
     '<tr><td style="padding:32px 36px;">'
     '<p style="font-size:15px;color:#18181b;margin:0 0 20px;line-height:1.5;{font}">'
     'Hello <strong>{owner_name}</strong>,</p>'
@@ -63,7 +61,6 @@ _DOWN_TEMPLATE = (
     '<span style="color:#71717a;">Noticed at: </span>'
     '<strong>{down_since}</strong></p>'
 
-    # CTA
     '<div style="text-align:center;padding:20px 0 4px;">'
     '<a href="{status_url}" style="display:inline-block;padding:12px 32px;'
     'border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;'
@@ -71,7 +68,6 @@ _DOWN_TEMPLATE = (
     '</div>'
     '</td></tr>'
 
-    # Footer row
     '<tr><td style="text-align:center;padding:20px 36px;border-top:1px solid #e4e4e7;">'
     '<p style="margin:0;font-size:12px;color:#a1a1aa;{font}">'
     'Powered by <a href="https://github.com/HellFireDevil18/Statrix" target="_blank"'
@@ -94,7 +90,6 @@ _UP_TEMPLATE = (
     ' style="max-width:560px;width:100%;margin:0 auto;background:#ffffff;'
     'border-radius:12px;border:1px solid #e4e4e7;border-collapse:collapse;">'
 
-    # Header row
     '<tr><td style="padding:24px 36px;border-bottom:1px solid #e4e4e7;text-align:center;">'
     '<img src="{logo_url}" alt="S" width="48" height="48"'
     ' style="display:inline-block;vertical-align:middle;border-radius:50%;'
@@ -105,7 +100,6 @@ _UP_TEMPLATE = (
     'Statrix</a>'
     '</td></tr>'
 
-    # Content row
     '<tr><td style="padding:32px 36px;">'
     '<p style="font-size:15px;color:#18181b;margin:0 0 20px;line-height:1.5;{font}">'
     'Hello <strong>{owner_name}</strong>,</p>'
@@ -132,7 +126,6 @@ _UP_TEMPLATE = (
     '<span style="color:#71717a;">Noticed at: </span>'
     '<strong>{recovered_at}</strong></p>'
 
-    # CTA
     '<div style="text-align:center;padding:20px 0 4px;">'
     '<a href="{status_url}" style="display:inline-block;padding:12px 32px;'
     'border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;'
@@ -140,7 +133,6 @@ _UP_TEMPLATE = (
     '</div>'
     '</td></tr>'
 
-    # Footer row
     '<tr><td style="text-align:center;padding:20px 36px;border-top:1px solid #e4e4e7;">'
     '<p style="margin:0;font-size:12px;color:#a1a1aa;{font}">'
     'Powered by <a href="https://github.com/HellFireDevil18/Statrix" target="_blank"'

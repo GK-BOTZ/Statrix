@@ -143,9 +143,10 @@ class CacheBackend(ABC):
         series_kind: str,
         monitor_id: str,
         max_score: float,
+        min_score: float | None = None,
         monitor_type: str | None = None,
     ) -> int:
-        """Delete series items with score <= max_score. Return count deleted."""
+        """Delete series items within [min_score, max_score]. Return count deleted."""
         ...
 
     @abstractmethod

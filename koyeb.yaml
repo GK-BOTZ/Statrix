@@ -9,8 +9,6 @@ services:
     env:
       - key: DATABASE_URL
         value: "{{DATABASE_URL}}"
-      - key: ENCRYPTION_KEY
-        value: "{{ENCRYPTION_KEY}}"
       - key: JWT_SECRET_KEY
         value: "{{JWT_SECRET_KEY}}"
       - key: OWNER_EMAIL

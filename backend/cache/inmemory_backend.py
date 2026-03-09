@@ -132,15 +132,17 @@ class InMemoryCacheBackend(CacheBackend):
         series_kind: str,
         monitor_id: str,
         max_score: float,
+        min_score: float | None = None,
         monitor_type: str | None = None,
     ) -> int:
         key = self._series_key(series_kind, monitor_id, monitor_type)
         items = self.series.get(series_kind, {}).get(key, [])
         keep = []
         removed = 0
+        min_bound = float("-inf") if min_score is None else float(min_score)
         for row in items:
             s = coerce_series_score(row, series_kind)
-            if s <= max_score:
+            if min_bound <= s <= max_score:
                 removed += 1
             else:
                 keep.append(row)

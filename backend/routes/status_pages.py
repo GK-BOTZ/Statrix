@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, time, date
 from enum import Enum
 import uuid
 
-from ..database import db
+from ..database import db, select_server_history_interval
 from ..config import settings
 from ..status_summary import status_summary_service
 from ..utils.time import utcnow
@@ -29,22 +29,22 @@ _SUMMARY_COLD_WAIT_SECONDS = max(
     0,
     int(getattr(settings, "STATUS_SUMMARY_COLD_WAIT_SECONDS", 5) or 5),
 )
-_RETENTION_HOURS = max(
-    24,
-    int(getattr(settings, "DATA_RETENTION_DAYS", 7) or 7) * 24,
-)
+def _get_cache_key(offset: int, sla_range: str | None, tz_offset_minutes: int) -> str:
+    return f"{offset}_{sla_range or 'none'}_{int(tz_offset_minutes or 0)}"
 
 
-def _get_cache_key(offset: int, sla_range: str | None) -> str:
-    return f"{offset}_{sla_range or 'none'}"
-
-
-def _summary_fast_path_enabled(offset: int, sla_range: "SlaRange | None") -> bool:
+def _summary_fast_path_enabled(
+    offset: int,
+    sla_range: "SlaRange | None",
+    tz_offset_minutes: int,
+) -> bool:
     if not bool(getattr(settings, "STATUS_SUMMARY_ENABLED", False)):
         return False
     if offset != 0:
         return False
     if sla_range is not None:
+        return False
+    if int(tz_offset_minutes or 0) != 0:
         return False
     return True
 
@@ -60,17 +60,6 @@ def _initializing_status_payload() -> dict:
     }
 
 
-def _select_server_history_interval(hours: int) -> str:
-    """Choose history rollup interval based on retention policy."""
-    if hours > _RETENTION_HOURS:
-        return "day"
-    if hours > 72:
-        return "hour"
-    if hours > 12:
-        return "15min"
-    return "raw"
-
-
 async def _build_summary_public_status_payload() -> dict | None:
     summary_payload = await status_summary_service.build_monitor_payload(offset=0, sla_range=None)
     if not summary_payload:
@@ -78,6 +67,14 @@ async def _build_summary_public_status_payload() -> dict | None:
     enriched = await _refresh_incident_fields(summary_payload)
     enriched["initializing"] = False
     return enriched
+
+
+async def _get_summary_monitor_record(monitor_id) -> dict | None:
+    try:
+        return await status_summary_service.get_monitor_summary(db, monitor_id)
+    except Exception as exc:
+        logger.debug("Failed to read cached status summary for monitor %s: %s", monitor_id, exc)
+        return None
 
 
 async def _get_cached_status(cache_key: str) -> dict | None:
@@ -191,6 +188,24 @@ def _status_since_iso(monitor: dict, status: str) -> str | None:
     if isinstance(created_at, str) and created_at.strip():
         return created_at
     return None
+
+
+def _public_server_metrics(metrics: dict | None, include_extended: bool = True) -> dict:
+    source = metrics or {}
+    result = {
+        "cpu": source.get("cpu"),
+        "ram": source.get("ram"),
+        "network_in": source.get("network_in"),
+        "network_out": source.get("network_out"),
+        "disk_percent": source.get("disk_percent"),
+        "load_1": source.get("load_1"),
+        "load_5": source.get("load_5"),
+        "load_15": source.get("load_15"),
+    }
+    if include_extended:
+        result["cpu_io_wait"] = source.get("cpu_io_wait")
+        result["cpu_steal"] = source.get("cpu_steal")
+    return result
 
 
 async def _resolve_incident_monitor_payload(incident: dict) -> dict:
@@ -457,8 +472,11 @@ async def get_public_status(
     tz_offset_minutes: int = Query(0, ge=-840, le=840, description="Browser timezone offset in minutes from UTC"),
     sla_range: SlaRange | None = Query(None, description="SLA uptime preset (affects uptime % calculations)")
 ):
-    cache_key = _get_cache_key(offset, sla_range.value if sla_range else None)
-    if _summary_fast_path_enabled(offset, sla_range):
+    # Aggregate public status stays on UTC day boundaries so every viewer
+    # shares the same cached payload instead of triggering per-timezone rebuilds.
+    normalized_tz_offset_minutes = 0
+    cache_key = _get_cache_key(offset, sla_range.value if sla_range else None, normalized_tz_offset_minutes)
+    if _summary_fast_path_enabled(offset, sla_range, normalized_tz_offset_minutes):
         try:
             payload = await _build_summary_public_status_payload()
             if payload is not None:
@@ -510,7 +528,7 @@ async def get_public_status(
         _schedule_status_refresh(
             cache_key,
             offset=offset,
-            tz_offset_minutes=tz_offset_minutes,
+            tz_offset_minutes=normalized_tz_offset_minutes,
             sla_range=sla_range,
         )
         try:
@@ -522,7 +540,7 @@ async def get_public_status(
             return stale_data
 
     try:
-        result = await _build_public_status_payload(offset, tz_offset_minutes, sla_range)
+        result = await _build_public_status_payload(offset, normalized_tz_offset_minutes, sla_range)
         await _set_cached_status(cache_key, result)
         return result
     except Exception as e:
@@ -565,12 +583,10 @@ async def _get_daily_status_from_minutes(
     maintenance_type: str = "website",
     tz_offset_minutes: int = 0
 ) -> list:
-    # Force UTC day boundaries for deterministic results across timezones.
-    tz_offset_minutes = 0
     now_utc = utcnow()
-    local_today = now_utc.date()
+    local_today = _to_local(now_utc, tz_offset_minutes).date()
     base_local_date = _get_base_local_date(now_utc, offset, tz_offset_minutes)
-    observed_start_local = first_data_at.date() if first_data_at else None
+    observed_start_local = _to_local(first_data_at, tz_offset_minutes).date() if first_data_at else None
 
     range_start_local = base_local_date - timedelta(days=days - 1)
     range_start_utc = _local_day_bounds_utc(range_start_local, tz_offset_minutes)[0]
@@ -583,15 +599,44 @@ async def _get_daily_status_from_minutes(
         maintenance_events, base_local_date, days, now_utc, tz_offset_minutes
     )
 
-    all_minutes = await db.get_monitor_minutes(monitor_id, range_start_utc, range_end_utc)
-
+    # Cached daily stats are stored on UTC calendar dates, so they are only
+    # safe to use when the caller is also asking for UTC day boundaries.
     daily_counts: dict = {}
-    for m in all_minutes:
-        day = m["minute"].date()
-        if day not in daily_counts:
-            daily_counts[day] = {"up": 0, "down": 0, "maintenance": 0}
-        status = m["status"]
-        daily_counts[day][status] = daily_counts[day].get(status, 0) + 1
+    cache_had_data = False
+    if db.cache_service and int(tz_offset_minutes or 0) == 0:
+        try:
+            daily_counts = await db.cache_service.get_daily_stats(
+                str(monitor_id),
+                range_start_local,
+                base_local_date
+            )
+            # Check if cache has any real data
+            for stats in daily_counts.values():
+                if (stats.get("up", 0) + stats.get("down", 0) + stats.get("maintenance", 0)) > 0:
+                    cache_had_data = True
+                    break
+        except Exception as e:
+            logger.warning("Failed to get daily stats from cache: %s", e)
+
+    # Fallback: process raw minutes if cache has no real data
+    if not cache_had_data:
+        logger.debug("Using raw minutes fallback for monitor %s", monitor_id)
+        try:
+            all_minutes = await db.get_monitor_minutes(monitor_id, range_start_utc, range_end_utc)
+            daily_counts = {}
+            for m in all_minutes:
+                minute_value = m.get("minute")
+                if not isinstance(minute_value, datetime):
+                    continue
+                day = _to_local(minute_value, tz_offset_minutes).date()
+                if day not in daily_counts:
+                    daily_counts[day] = {"up": 0, "down": 0, "maintenance": 0}
+                status = m["status"]
+                if status in daily_counts[day]:
+                    daily_counts[day][status] = daily_counts[day].get(status, 0) + 1
+        except Exception as e:
+            logger.error("Failed to process raw minutes for monitor %s: %s", monitor_id, e)
+            daily_counts = {}
 
     result: list = []
     for i in range(days - 1, -1, -1):
@@ -644,6 +689,39 @@ async def _get_detailed_uptime_stats_from_minutes(
     if not has_data:
         return {"24h": None, "7d": None, "30d": None, "year": None, "total": None, "first_data_at": None}
 
+    # Use pre-aggregated daily stats from cache for faster multi-period uptime calculation
+    cache_result = None
+    if db.cache_service:
+        try:
+            cache_result = await db.cache_service.get_multi_period_uptime_from_daily(
+                str(monitor_id), first_data_at
+            )
+            period_keys = ["24h", "7d", "30d", "year", "total"]
+            cache_usable = (
+                isinstance(cache_result, dict)
+                and all(k in cache_result for k in period_keys)
+                and all(
+                    cache_result.get(k) is None or isinstance(cache_result.get(k), (int, float))
+                    for k in period_keys
+                )
+                and any(cache_result.get(k) is not None for k in period_keys)
+            )
+            if cache_usable:
+                logger.debug("Using exact cached multi-period uptime for monitor %s", monitor_id)
+                return cache_result
+            logger.debug(
+                "Cached multi-period uptime unusable for monitor %s, using fallback",
+                monitor_id,
+            )
+        except Exception as e:
+            logger.debug(
+                "Failed to get exact cached multi-period uptime for monitor %s, using fallback: %s",
+                monitor_id,
+                e,
+                exc_info=True,
+            )
+
+    # Fallback: use the original method if cache has no data
     year_start = datetime(now.year, 1, 1)
     total_start = first_data_at or year_start
 
@@ -711,17 +789,18 @@ async def _process_uptime_monitor(
     status = m.get("status", "unknown")
     last_checkin_at = m.get("last_checkin_at")
     has_data = last_checkin_at is not None
+    summary_rec = await _get_summary_monitor_record(monitor_id)
 
-    multi_stats = await db.get_uptime_multi_period_stats(monitor_id)
-    first_check = (multi_stats or {}).get("first_check")
-    first_data_at = first_check or (m.get("created_at") if has_data else None)
+    first_data_at = (summary_rec or {}).get("first_data_at") or (m.get("created_at") if has_data else None)
 
-    response_time_avg = (multi_stats or {}).get("avg_response_time")
-    if response_time_avg is not None:
-        try:
-            response_time_avg = float(response_time_avg)
-        except Exception:
-            response_time_avg = None
+    response_time_avg = None
+    if summary_rec:
+        rt_count = int(summary_rec.get("rt_count_up") or 0)
+        if rt_count > 0:
+            try:
+                response_time_avg = float(summary_rec.get("rt_sum_up") or 0.0) / rt_count
+            except Exception:
+                response_time_avg = None
 
     if sla_start and sla_end:
         uptime_pct = await _calculate_uptime_from_minutes(monitor_id, sla_start, sla_end, has_data=has_data)
@@ -770,24 +849,9 @@ async def _process_server_monitor(
     status = m.get("status", "unknown")
     last_checkin_at = m.get("last_checkin_at")
     has_data = last_checkin_at is not None
-    first_data_at = m.get("created_at") if has_data else None
-
-    history = await db.get_server_history(monitor_id, limit=1)
-    metrics = {}
-    if history:
-        latest = history[0]
-        metrics = {
-            "cpu": latest.get("cpu_percent"),
-            "ram": latest.get("ram_percent"),
-            "network_in": latest.get("network_in"),
-            "network_out": latest.get("network_out"),
-            "disk_percent": latest.get("disk_percent"),
-            "load_1": latest.get("load_1"),
-            "load_5": latest.get("load_5"),
-            "load_15": latest.get("load_15"),
-            "cpu_io_wait": latest.get("cpu_io_wait"),
-            "cpu_steal": latest.get("cpu_steal"),
-        }
+    summary_rec = await _get_summary_monitor_record(monitor_id)
+    first_data_at = (summary_rec or {}).get("first_data_at") or (m.get("created_at") if has_data else None)
+    metrics = _public_server_metrics((summary_rec or {}).get("metrics"), include_extended=True)
 
     if sla_start and sla_end:
         uptime_pct = await _calculate_uptime_from_minutes(monitor_id, sla_start, sla_end, has_data=has_data)
@@ -895,9 +959,10 @@ async def get_public_heartbeat_server_agent_monitor(
         status = monitor.get("status", "unknown")
         last_checkin_at = monitor.get("last_checkin_at")
         has_data = last_checkin_at is not None
-        first_data_at = monitor.get("created_at") if has_data else None
+        summary_rec = await _get_summary_monitor_record(monitor["id"])
+        first_data_at = (summary_rec or {}).get("first_data_at") or (monitor.get("created_at") if has_data else None)
 
-        seven_day_history, uptime_stats, history = await asyncio.gather(
+        seven_day_history, uptime_stats = await asyncio.gather(
             _get_daily_status_from_minutes(
                 monitor["id"], days=7,
                 first_data_at=first_data_at,
@@ -907,23 +972,10 @@ async def get_public_heartbeat_server_agent_monitor(
             _get_detailed_uptime_stats_from_minutes(
                 monitor["id"], first_data_at, has_data
             ),
-            db.get_server_history(monitor["id"], limit=1),
             return_exceptions=False
         )
 
-        metrics = {}
-        if history:
-            latest = history[0]
-            metrics = {
-                "cpu": latest.get("cpu_percent"),
-                "ram": latest.get("ram_percent"),
-                "network_in": latest.get("network_in"),
-                "network_out": latest.get("network_out"),
-                "disk_percent": latest.get("disk_percent"),
-                "load_1": latest.get("load_1"),
-                "load_5": latest.get("load_5"),
-                "load_15": latest.get("load_15"),
-            }
+        metrics = _public_server_metrics((summary_rec or {}).get("metrics"), include_extended=False)
 
         return {
             "id": str(monitor["id"]),
@@ -976,7 +1028,7 @@ async def get_public_heartbeat_server_agent_history(
                 raise HTTPException(status_code=400, detail="start must be before end")
             history = await db.get_server_history_range(monitor_uuid, start, end)
         else:
-            interval = _select_server_history_interval(hours)
+            interval = select_server_history_interval(hours)
             if interval == "day":
                 history = await db.get_server_history_aggregated(monitor_uuid, hours=hours, interval='day')
             elif interval == "hour":
@@ -1064,10 +1116,8 @@ async def get_public_uptime_monitor(
         status = monitor.get("status", "unknown")
         last_checkin_at = monitor.get("last_checkin_at")
         has_data = last_checkin_at is not None
-
-        multi_stats = await db.get_uptime_multi_period_stats(monitor["id"])
-        first_check = (multi_stats or {}).get("first_check")
-        first_data_at = first_check or (monitor.get("created_at") if has_data else None)
+        summary_rec = await _get_summary_monitor_record(monitor["id"])
+        first_data_at = (summary_rec or {}).get("first_data_at") or (monitor.get("created_at") if has_data else None)
 
         seven_day_history, uptime_stats = await asyncio.gather(
             _get_daily_status_from_minutes(

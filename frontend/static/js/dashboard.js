@@ -198,6 +198,28 @@ function getStatusSinceTimestampMs(monitor, sourceType, status) {
     return toTimestampMs(monitor.created_at);
 }
 
+function mergeStatusSinceValue(existingValue, incomingValue, existingStatus, incomingStatus) {
+    const existingSinceMs = toTimestampMs(existingValue);
+    const incomingSinceMs = toTimestampMs(incomingValue);
+    const existingStatusValue = String(existingStatus || '').trim().toLowerCase();
+    const incomingStatusValue = String(incomingStatus || '').trim().toLowerCase();
+
+    if (Number.isFinite(incomingSinceMs) && incomingSinceMs > 0) {
+        if (
+            existingStatusValue &&
+            incomingStatusValue &&
+            existingStatusValue === incomingStatusValue &&
+            Number.isFinite(existingSinceMs) &&
+            existingSinceMs > 0
+        ) {
+            return new Date(Math.min(existingSinceMs, incomingSinceMs)).toISOString();
+        }
+        return incomingValue;
+    }
+
+    return existingValue || null;
+}
+
 function formatDurationFromMs(diffMs) {
     if (!Number.isFinite(diffMs) || diffMs <= 0) return '--';
     const totalMinutes = Math.floor(diffMs / (1000 * 60));
@@ -299,7 +321,7 @@ function updateCheckAgeCells() {
     });
 }
 
-function formatUpDownDuration(status, sinceMs) {
+function formatUpDownDuration(sinceMs) {
     if (!Number.isFinite(sinceMs) || sinceMs <= 0) {
         return '--';
     }
@@ -308,10 +330,9 @@ function formatUpDownDuration(status, sinceMs) {
 
 function updateUpDownCells() {
     document.querySelectorAll('.up-down-age[data-status][data-status-since-ts]').forEach((el) => {
-        const status = String(el.getAttribute('data-status') || '').toLowerCase();
         const raw = el.getAttribute('data-status-since-ts');
         const sinceMs = raw ? Number(raw) : Number.NaN;
-        el.textContent = formatUpDownDuration(status, sinceMs);
+        el.textContent = formatUpDownDuration(sinceMs);
     });
 }
 
@@ -637,8 +658,7 @@ async function loadAllData() {
         }
 
         try {
-            const tzOffsetMinutes = -new Date().getTimezoneOffset();
-            const statusRes = await fetch(`/api/public/status?tz_offset_minutes=${encodeURIComponent(String(tzOffsetMinutes))}&_=${Date.now()}`, {
+            const statusRes = await fetch(`/api/public/status?_=${Date.now()}`, {
                 credentials: 'include',
                 cache: 'no-store'
             });
@@ -658,9 +678,16 @@ async function loadAllData() {
                                     : [];
                         const monitor = monitorList.find(m => String(m.id) === String(statusMonitor.id));
                         if (monitor) {
+                            const existingStatus = monitor.status;
+                            const incomingStatus = statusMonitor.status;
                             monitor.uptime_percentage = statusMonitor.uptime_percentage;
-                            monitor.status = statusMonitor.status;
-                            monitor.status_since = statusMonitor.status_since || null;
+                            monitor.status = incomingStatus;
+                            monitor.status_since = mergeStatusSinceValue(
+                                monitor.status_since,
+                                statusMonitor.status_since,
+                                existingStatus,
+                                incomingStatus
+                            );
                             monitor.first_data_at = statusMonitor.first_data_at || monitor.first_data_at || null;
                             if (typeof statusMonitor.response_time_avg === 'number') {
                                 monitor.response_time_avg = statusMonitor.response_time_avg;
@@ -1305,7 +1332,7 @@ function updateStats() {
 
     if (totalChecksEl) {
         const checksPerDay = total * (24 * 60);
-        const totalChecks = checksPerDay * 60; // 60 days
+        const totalChecks = checksPerDay * 60;
         totalChecksEl.textContent = formatNumber(totalChecks);
     }
 
@@ -3173,7 +3200,6 @@ function getAddMonitorModalHTML(initialType, isEdit = false) {
             </div>
             <div style="padding:20px 24px;">
                 <form id="add-monitor-form" onsubmit="return false;">
-                    <!-- Monitor Type -->
                     <div class="form-group" style="margin-bottom:16px;">
                         <label style="display:block; margin-bottom:6px; font-size:0.85rem; color:#c0c6ce; font-weight:500;">Monitor Type</label>
                         <select id="monitor-type-select" onchange="onMonitorTypeChange()" style="width:100%; padding:9px 12px; background:#1a1f26; border:1px solid #3a424d; border-radius:4px; color:#fff; font-size:0.9rem;">
@@ -3182,22 +3208,18 @@ function getAddMonitorModalHTML(initialType, isEdit = false) {
                         </select>
                     </div>
 
-                    <!-- Dynamic fields container -->
                     <div id="monitor-dynamic-fields"></div>
 
-                    <!-- Advanced Settings Toggle -->
                     <div class="form-group" id="advanced-settings-toggle" style="margin-bottom:12px; margin-top:8px;">
                         <a href="#" onclick="toggleAdvancedSettings(); return false;" style="color:#44b6ae; text-decoration:none; font-size:0.85rem;">
                             <i class="fas fa-cog"></i> show advanced settings <i class="fas fa-chevron-down" id="advanced-toggle-icon"></i>
                         </a>
                     </div>
 
-                    <!-- Advanced Settings -->
                     <div id="advanced-settings" style="display:none;">
                         <div id="monitor-advanced-fields"></div>
                     </div>
 
-                    <!-- Submit -->
                     <div style="padding-top:16px; border-top:1px solid #2d343d; margin-top:16px; display:flex; justify-content:flex-end; gap:10px;">
                         <button type="button" class="btn btn-secondary" onclick="hideModal()" style="padding:9px 18px;">Cancel</button>
                         <button type="button" class="btn btn-primary" id="add-monitor-submit-btn" onclick="submitAddMonitor()" style="padding:9px 24px; background:#44b6ae; border-color:#44b6ae;">
@@ -4260,6 +4282,17 @@ function getHistoryStatusValue(entry) {
     return null;
 }
 
+function getStatusBaseUtcDate(offset = 0) {
+    const now = new Date();
+    const baseUtc = new Date(Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate()
+    ));
+    baseUtc.setUTCDate(baseUtc.getUTCDate() + Number(offset || 0));
+    return baseUtc;
+}
+
 function buildDailyUptimeSeries() {
     const monitors = [
         ...state.monitors.uptime,
@@ -4280,10 +4313,9 @@ function buildDailyUptimeSeries() {
     const data = [];
 
     for (let i = days - 1; i >= 0; i--) {
-        const date = new Date();
-        date.setDate(date.getDate() - i);
+        const date = getStatusBaseUtcDate(-i);
         dates.push(date);
-        labels.push(date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+        labels.push(date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }));
     }
 
     for (let i = 0; i < days; i++) {
@@ -4318,14 +4350,13 @@ function buildDailySeriesFromStatusPayload(payload, offset = 0) {
     const labels = [];
     const dates = [];
     const data = [];
-    const baseDate = new Date();
-    baseDate.setDate(baseDate.getDate() + Number(offset || 0));
+    const baseDate = getStatusBaseUtcDate(offset);
 
     for (let i = days - 1; i >= 0; i--) {
         const date = new Date(baseDate);
-        date.setDate(baseDate.getDate() - i);
+        date.setUTCDate(baseDate.getUTCDate() - i);
         dates.push(date);
-        labels.push(date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+        labels.push(date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }));
     }
 
     for (let i = 0; i < days; i++) {
@@ -4348,7 +4379,6 @@ function buildDailySeriesFromStatusPayload(payload, offset = 0) {
 async function fetchPublicStatusByOffset(offset = 0) {
     const params = new URLSearchParams();
     if (offset !== 0) params.set('offset', String(offset));
-    params.set('tz_offset_minutes', String(-new Date().getTimezoneOffset()));
     const endpoint = `/api/public/status${params.toString() ? `?${params.toString()}` : ''}`;
     const res = await fetch(endpoint, { credentials: 'include', cache: 'no-store' });
     if (!res.ok) {
@@ -4488,7 +4518,7 @@ function changePage(type, page) {
 
 function changePerPage(type, perPage) {
     state.pagination[type].perPage = parseInt(perPage);
-    state.pagination[type].page = 1; // Reset to first page
+    state.pagination[type].page = 1;
     refreshCurrentView();
 }
 

@@ -10,7 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, status
 
 from ..config import settings
-from ..database import db
+from ..database import db, select_server_history_interval
 from ..models import (
     ServerHistoryData,
     ServerMonitorCreate,
@@ -255,13 +255,14 @@ async def get_server_history(
             status_code=status.HTTP_404_NOT_FOUND, detail="Server monitor not found"
         )
 
-    if hours <= 24:
+    interval = select_server_history_interval(hours)
+    if interval == "raw":
         history = await db.get_server_history(server_id, hours=hours)
-    elif hours <= 72:
+    elif interval == "15min":
         history = await db.get_server_history_aggregated(
             server_id, hours=hours, interval="15min"
         )
-    elif hours <= 336:
+    elif interval == "hour":
         history = await db.get_server_history_aggregated(
             server_id, hours=hours, interval="hour"
         )

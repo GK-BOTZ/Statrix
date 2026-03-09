@@ -4,10 +4,12 @@
 import asyncpg
 import asyncio
 import logging
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from asyncpg import Pool
 from typing import Any
 import uuid
-from datetime import datetime, timedelta
+
 from .config import settings
 from .cache import CacheService, CacheUnavailableError
 from .utils.time import utcnow
@@ -26,6 +28,141 @@ MAINTENANCE_TABLE_MAP = {
 
 GRACE_PERIOD_MINUTES = 3
 logger = logging.getLogger(__name__)
+
+
+def select_server_history_interval(hours: int) -> str:
+    retention_hours = max(
+        24,
+        int(getattr(settings, "DATA_RETENTION_DAYS", 7) or 7) * 24,
+    )
+    if hours > retention_hours:
+        return "day"
+    if hours > 72:
+        return "hour"
+    if hours > 12:
+        return "15min"
+    return "raw"
+
+
+def _server_history_retention_cutoff(now: datetime | None = None) -> datetime:
+    current = now or utcnow()
+    return current - timedelta(days=max(1, int(getattr(settings, "DATA_RETENTION_DAYS", 7) or 7)))
+
+
+_SERVER_HISTORY_FLOAT_FIELDS = (
+    "cpu_percent",
+    "cpu_io_wait",
+    "cpu_steal",
+    "cpu_user",
+    "cpu_system",
+    "ram_percent",
+    "ram_swap_percent",
+    "ram_buff_percent",
+    "ram_cache_percent",
+    "load_1",
+    "load_5",
+    "load_15",
+    "disk_percent",
+)
+
+_SERVER_HISTORY_INT_FIELDS = (
+    "network_in",
+    "network_out",
+)
+
+
+def _server_history_row_count(row: dict[str, Any]) -> int:
+    try:
+        return max(0, int(row.get("_record_count") or 0))
+    except Exception:
+        return 0
+
+
+def _weighted_metric_value(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    field: str,
+    as_int: bool = False,
+) -> Any:
+    left_count = _server_history_row_count(left)
+    right_count = _server_history_row_count(right)
+    left_value = left.get(field)
+    right_value = right.get(field)
+
+    total_weight = 0
+    weighted_total = 0.0
+
+    if left_value is not None and left_count > 0:
+        weighted_total += float(left_value) * left_count
+        total_weight += left_count
+    if right_value is not None and right_count > 0:
+        weighted_total += float(right_value) * right_count
+        total_weight += right_count
+
+    if total_weight <= 0:
+        return right_value if right_value is not None else left_value
+
+    if as_int:
+        return int(round(weighted_total / total_weight))
+    return weighted_total / total_weight
+
+
+def _normalize_server_history_value(value: Any, as_int: bool = False) -> Any:
+    if value is None:
+        return None
+
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return value
+
+    if as_int:
+        return int(round(numeric_value))
+    return numeric_value
+
+
+def _normalize_server_history_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+
+    for field in _SERVER_HISTORY_FLOAT_FIELDS:
+        if field in normalized:
+            normalized[field] = _normalize_server_history_value(normalized.get(field))
+
+    for field in _SERVER_HISTORY_INT_FIELDS:
+        if field in normalized:
+            normalized[field] = _normalize_server_history_value(
+                normalized.get(field), as_int=True
+            )
+
+    return normalized
+
+
+def _merge_server_history_rows(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(left)
+    merged["_record_count"] = _server_history_row_count(left) + _server_history_row_count(right)
+
+    for field in _SERVER_HISTORY_FLOAT_FIELDS:
+        merged[field] = _weighted_metric_value(left, right, field)
+    for field in _SERVER_HISTORY_INT_FIELDS:
+        merged[field] = _weighted_metric_value(left, right, field, as_int=True)
+
+    return merged
+
+
+def _strip_server_history_internal_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for row in rows:
+        cleaned.append({k: v for k, v in row.items() if not k.startswith("_")})
+    return cleaned
+
+
+@dataclass(frozen=True)
+class CompressionJob:
+    job_id: str
+    monitor_kind: str
+    monitor_id: uuid.UUID
+    window_start: datetime
+    window_end: datetime
 
 # Allowlists of columns that may be dynamically SET via **kwargs in update
 # functions. Any key not in the corresponding set is rejected to prevent
@@ -68,6 +205,9 @@ class Database:
         self.cache_loaded_at: datetime | None = None
         self.cache_service: CacheService | None = None
         self._cache_resync_lock = asyncio.Lock()
+        self._cache_rebuild_task: asyncio.Task | None = None
+        self._cache_rebuild_last_started_at: datetime | None = None
+        self._cache_rebuild_cooldown_seconds: int = 60
         self.pool_min_size = settings.PG_POOL_MIN_SIZE
         self.pool_max_size = settings.PG_POOL_MAX_SIZE
         self.pool_statement_cache_size = 0
@@ -77,6 +217,221 @@ class Database:
     def init_cache_service(self):
         if self.cache_service is None:
             self.cache_service = CacheService()
+
+    def _allow_db_fallback_on_cache_miss(self) -> bool:
+        """Allow temporary DB fallback while cache is still warming."""
+        if self.cache_only or self.pool is None:
+            return False
+        return self.cache_warming_up or self.cache_loaded_at is None
+
+    async def _get_uptime_check_rows(
+        self,
+        monitor_id: uuid.UUID,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[dict]:
+        end_dt = end or utcnow()
+
+        if self.cache_only or not self.pool:
+            return []
+
+        clauses = ["monitor_id = $1"]
+        params: list[Any] = [monitor_id]
+        next_param = 2
+        if start is not None:
+            clauses.append(f"checked_at >= ${next_param}")
+            params.append(start)
+            next_param += 1
+        clauses.append(f"checked_at < ${next_param}")
+        params.append(end_dt)
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""SELECT checked_at, status, response_time_ms
+                    FROM uptime_checks
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY checked_at ASC""",
+                *params,
+            )
+            return [dict(row) for row in rows]
+
+    async def _get_server_history_rows(
+        self,
+        server_id: uuid.UUID,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        if self.cache_only or not self.pool:
+            return []
+
+        async with self.pool.acquire() as conn:
+            if limit:
+                rows = await conn.fetch(
+                    """SELECT * FROM server_history
+                       WHERE server_id = $1
+                       ORDER BY timestamp DESC
+                       LIMIT $2""",
+                    server_id,
+                    limit,
+                )
+            else:
+                clauses = ["server_id = $1"]
+                params: list[Any] = [server_id]
+                next_param = 2
+                if start is not None:
+                    clauses.append(f"timestamp >= ${next_param}")
+                    params.append(start)
+                    next_param += 1
+                if end is not None:
+                    clauses.append(f"timestamp < ${next_param}")
+                    params.append(end)
+                rows = await conn.fetch(
+                    f"""SELECT * FROM server_history
+                        WHERE {' AND '.join(clauses)}
+                        ORDER BY timestamp ASC""",
+                    *params,
+                )
+            return [_normalize_server_history_row(dict(row)) for row in rows]
+
+    async def _get_server_history_daily_rows(
+        self,
+        server_id: uuid.UUID,
+        start: datetime,
+        end: datetime,
+        include_start_partial_day: bool = False,
+        include_end_partial_day: bool = False,
+    ) -> list[dict]:
+        if self.cache_only or not self.pool or start >= end:
+            return []
+
+        start_day = datetime.combine(start.date(), time.min)
+        if not include_start_partial_day and start > start_day:
+            start_day += timedelta(days=1)
+
+        end_day = datetime.combine(end.date(), time.min)
+        if include_end_partial_day and end > end_day:
+            end_day += timedelta(days=1)
+
+        if start_day >= end_day:
+            return []
+
+        start_date = start_day.date()
+        end_date = end_day.date()
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    date,
+                    avg_cpu_percent,
+                    avg_cpu_io_wait,
+                    avg_cpu_steal,
+                    avg_cpu_user,
+                    avg_cpu_system,
+                    avg_ram_percent,
+                    avg_ram_swap_percent,
+                    avg_ram_buff_percent,
+                    avg_ram_cache_percent,
+                    avg_load_1,
+                    avg_load_5,
+                    avg_load_15,
+                    avg_network_in,
+                    avg_network_out,
+                    avg_disk_percent,
+                    record_count
+                FROM server_history_daily
+                WHERE server_id = $1
+                  AND date >= $2
+                  AND date < $3
+                ORDER BY date ASC
+                """,
+                server_id,
+                start_date,
+                end_date,
+            )
+
+        result: list[dict] = []
+        for row in rows:
+            day_value = row["date"]
+            result.append(
+                _normalize_server_history_row(
+                    {
+                        "timestamp": datetime(day_value.year, day_value.month, day_value.day),
+                        "cpu_percent": row.get("avg_cpu_percent"),
+                        "cpu_io_wait": row.get("avg_cpu_io_wait"),
+                        "cpu_steal": row.get("avg_cpu_steal"),
+                        "cpu_user": row.get("avg_cpu_user"),
+                        "cpu_system": row.get("avg_cpu_system"),
+                        "ram_percent": row.get("avg_ram_percent"),
+                        "ram_swap_percent": row.get("avg_ram_swap_percent"),
+                        "ram_buff_percent": row.get("avg_ram_buff_percent"),
+                        "ram_cache_percent": row.get("avg_ram_cache_percent"),
+                        "load_1": row.get("avg_load_1"),
+                        "load_5": row.get("avg_load_5"),
+                        "load_15": row.get("avg_load_15"),
+                        "network_in": row.get("avg_network_in"),
+                        "network_out": row.get("avg_network_out"),
+                        "disk_percent": row.get("avg_disk_percent"),
+                        "_record_count": int(row.get("record_count") or 0),
+                    }
+                )
+            )
+        return result
+
+    async def _get_server_history_bucket_rows(
+        self,
+        server_id: uuid.UUID,
+        start: datetime,
+        end: datetime,
+        interval: str,
+    ) -> list[dict]:
+        if self.cache_only or not self.pool or start >= end:
+            return []
+
+        if interval == "15min":
+            bucket_expr = (
+                "date_trunc('hour', timestamp) + "
+                "(floor(date_part('minute', timestamp) / 15)::int * interval '15 minutes')"
+            )
+        elif interval == "hour":
+            bucket_expr = "date_trunc('hour', timestamp)"
+        else:
+            bucket_expr = "date_trunc('day', timestamp)"
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    {bucket_expr} AS timestamp,
+                    AVG(cpu_percent) AS cpu_percent,
+                    AVG(cpu_io_wait) AS cpu_io_wait,
+                    AVG(cpu_steal) AS cpu_steal,
+                    AVG(cpu_user) AS cpu_user,
+                    AVG(cpu_system) AS cpu_system,
+                    AVG(ram_percent) AS ram_percent,
+                    AVG(ram_swap_percent) AS ram_swap_percent,
+                    AVG(ram_buff_percent) AS ram_buff_percent,
+                    AVG(ram_cache_percent) AS ram_cache_percent,
+                    AVG(load_1) AS load_1,
+                    AVG(load_5) AS load_5,
+                    AVG(load_15) AS load_15,
+                    AVG(network_in) AS network_in,
+                    AVG(network_out) AS network_out,
+                    AVG(disk_percent) AS disk_percent,
+                    COUNT(*) AS _record_count
+                FROM server_history
+                WHERE server_id = $1
+                  AND timestamp >= $2
+                  AND timestamp < $3
+                GROUP BY 1
+                ORDER BY timestamp ASC
+                """,
+                server_id,
+                start,
+                end,
+            )
+        return [_normalize_server_history_row(dict(row)) for row in rows]
 
     async def connect(self):
         if self.cache_service is None:
@@ -94,6 +449,12 @@ class Database:
         )
 
     async def close(self):
+        if self._cache_rebuild_task and not self._cache_rebuild_task.done():
+            self._cache_rebuild_task.cancel()
+            try:
+                await self._cache_rebuild_task
+            except asyncio.CancelledError:
+                pass
         if self.pool:
             await self.pool.close()
         if self.cache_service:
@@ -275,16 +636,18 @@ class Database:
         entity_snap = await self._get_entity_snapshot()
         entity_snap["series"] = {}
 
-        async def _entity_loader():
-            return entity_snap
+        async def _entity_loader(snapshot=entity_snap):
+            return snapshot
 
         await self.cache_service.warmup_from_loader(_entity_loader)
-        del entity_snap
 
         # Stage 2: stream each series kind from PG to Redis via cursor.
         # Only ~500 rows exist in Python memory at any time.
         counts: dict[str, int] = {}
         for series_kind, query, group_key in self._SERIES_QUERIES:
+            if self.cache_service and not self.cache_service.is_series_enabled(series_kind):
+                counts[series_kind] = 0
+                continue
             counts[series_kind] = await self._stream_series_to_cache(
                 series_kind, query, group_key,
             )
@@ -292,21 +655,6 @@ class Database:
         await self.cache_service.write_warmup_meta(counts)
         self.cache_enabled = True
         self.cache_loaded_at = utcnow()
-
-    async def get_cache_snapshot(self) -> dict[str, Any]:
-        snap = await self._get_entity_snapshot()
-        if not self.pool:
-            snap["series"] = {}
-            return snap
-
-        series: dict[str, Any] = {}
-        for series_kind, query, group_key in self._SERIES_QUERIES:
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch(query)
-            series[series_kind] = self._group_series_rows(series_kind, rows, group_key)
-            del rows
-        snap["series"] = series
-        return snap
 
     async def get_cache_stats(self) -> dict:
         service_stats: dict[str, Any] = {}
@@ -328,7 +676,11 @@ class Database:
     async def ensure_cache_available(self) -> None:
         if not self.cache_service:
             return
-        await self.cache_service.ensure_available()
+        try:
+            await self.cache_service.ensure_available()
+        except CacheUnavailableError as exc:
+            self.trigger_cache_rebuild(f"ensure_available:{exc}")
+            raise
 
     async def mark_cache_unhealthy(self, reason: str) -> None:
         if self.cache_service:
@@ -367,15 +719,17 @@ class Database:
             entity_snap = await self._get_entity_snapshot()
             entity_snap["series"] = {}
 
-            async def _loader():
-                return entity_snap
+            async def _loader(snapshot=entity_snap):
+                return snapshot
 
             await self.cache_service.warmup_from_loader(_loader)
-            del entity_snap
 
             # Stage 2: stream series via cursor (same as load_cache)
             counts: dict[str, int] = {}
             for series_kind, query, group_key in self._SERIES_QUERIES:
+                if self.cache_service and not self.cache_service.is_series_enabled(series_kind):
+                    counts[series_kind] = 0
+                    continue
                 counts[series_kind] = await self._stream_series_to_cache(
                     series_kind, query, group_key,
                 )
@@ -383,6 +737,67 @@ class Database:
             await self.cache_service.write_warmup_meta(counts)
             self.cache_enabled = True
             self.cache_loaded_at = utcnow()
+
+    async def _event_rebuild_cache(self, reason: str) -> None:
+        try:
+            if not self.cache_service or not self.pool:
+                return
+
+            try:
+                if await self.cache_service.backend.ping():
+                    await self.cache_service.mark_healthy()
+                    logger.info(
+                        "Cache recovered via ping; skipped event-driven rebuild (reason=%s)",
+                        reason,
+                    )
+                    return
+            except Exception:
+                logger.debug("Event-driven cache pre-rebuild ping failed", exc_info=True)
+
+            logger.warning("Cache unavailable; starting event-driven rebuild (reason=%s)", reason)
+            await self.resync_cache_from_db()
+            svc = self._get_status_summary_service()
+            if svc:
+                await svc.rebuild_from_redis(self)
+            await self.cache_service.mark_healthy()
+            logger.info("Event-driven cache rebuild succeeded")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Event-driven cache rebuild failed")
+        finally:
+            self._cache_rebuild_task = None
+
+    def trigger_cache_rebuild(self, reason: str = "cache_unavailable") -> bool:
+        if not self.cache_service or not self.pool:
+            return False
+        if self.cache_warming_up:
+            return False
+        if self._cache_rebuild_task and not self._cache_rebuild_task.done():
+            return False
+
+        now = utcnow()
+        if self._cache_rebuild_last_started_at:
+            elapsed = (now - self._cache_rebuild_last_started_at).total_seconds()
+            if elapsed < self._cache_rebuild_cooldown_seconds:
+                logger.debug(
+                    "Skipping event-driven cache rebuild (cooldown %.1fs < %ss)",
+                    elapsed,
+                    self._cache_rebuild_cooldown_seconds,
+                )
+                return False
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        reason_text = str(reason or "cache_unavailable").strip()
+        if len(reason_text) > 140:
+            reason_text = f"{reason_text[:137]}..."
+        self._cache_rebuild_last_started_at = now
+        self._cache_rebuild_task = loop.create_task(self._event_rebuild_cache(reason_text))
+        return True
 
 
     @staticmethod
@@ -592,9 +1007,12 @@ class Database:
                 )
                 filtered = [m for m in items if m.get("minute") is not None and start <= m["minute"] < end]
                 filtered.sort(key=lambda r: r.get("minute") or datetime.min)
-                return filtered
+                if filtered or not self._allow_db_fallback_on_cache_miss():
+                    return filtered
             except CacheUnavailableError:
                 pass
+        if self.cache_only:
+            return []
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT monitor_id, minute, status FROM monitor_minutes
@@ -619,9 +1037,12 @@ class Database:
                     s = r.get("status", "")
                     if s in counts:
                         counts[s] += 1
-                return counts
+                if (counts["up"] + counts["down"] + counts["maintenance"]) > 0 or not self._allow_db_fallback_on_cache_miss():
+                    return counts
             except CacheUnavailableError:
                 pass
+        if self.cache_only:
+            return {"up": 0, "down": 0, "maintenance": 0}
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT status, COUNT(*) as cnt FROM monitor_minutes
@@ -648,49 +1069,56 @@ class Database:
         elif status_lower == "maintenance":
             status_since = utcnow()
 
-        if self.cache_enabled and self.cache_service:
-            monitor = await self.cache_service.get_entity(kind, str(monitor_id))
-            if monitor:
-                previous_status = str(monitor.get("status") or "").strip().lower()
-                if status_since and (previous_status != status_lower or monitor.get("status_since") is None):
-                    monitor["status_since"] = status_since
-                monitor["status"] = status
-                if last_checkin_at is not None:
-                    monitor["last_checkin_at"] = last_checkin_at
-                monitor["down_since"] = down_since
-                await self.cache_service.set_entity(kind, str(monitor_id), monitor)
         table_map = {"uptime": "uptime_monitors", "server": "server_monitors", "heartbeat": "heartbeat_monitors"}
         table = table_map.get(kind)
+        effective_last_checkin_at = last_checkin_at
+        effective_down_since = down_since
+        effective_status_since = status_since
         if table:
             try:
                 async with self.pool.acquire() as conn:
-                    await conn.execute(
+                    row = await conn.fetchrow(
                         f"""
                         UPDATE {table} AS m
                            SET status = $1::varchar,
                                last_checkin_at = $2,
                                down_since = $3,
                                status_since = CASE
-                                   WHEN m.status IS DISTINCT FROM $1::varchar THEN COALESCE($4::timestamp, m.status_since, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'))
-                                   ELSE m.status_since
-                               END
+                                    WHEN m.status IS DISTINCT FROM $1::varchar THEN COALESCE($4::timestamp, m.status_since, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'))
+                                    ELSE m.status_since
+                                END
                          WHERE m.id = $5
+                         RETURNING status, last_checkin_at, down_since, status_since
                         """,
                         status, last_checkin_at, down_since, status_since, monitor_id
                     )
+                    if row:
+                        effective_last_checkin_at = row.get("last_checkin_at")
+                        effective_down_since = row.get("down_since")
+                        effective_status_since = row.get("status_since")
             except Exception:
                 logger.exception(
                     "Failed to update monitor status kind=%s monitor_id=%s status=%s",
                     kind, monitor_id, status
                 )
+        if self.cache_enabled and self.cache_service:
+            monitor = await self.cache_service.get_entity(kind, str(monitor_id))
+            if monitor:
+                monitor["status"] = status
+                if effective_last_checkin_at is not None:
+                    monitor["last_checkin_at"] = effective_last_checkin_at
+                monitor["down_since"] = effective_down_since
+                if effective_status_since is not None:
+                    monitor["status_since"] = effective_status_since
+                await self.cache_service.set_entity(kind, str(monitor_id), monitor)
         self._status_summary_note(
             "note_monitor_status",
             kind,
             monitor_id,
             status,
-            last_checkin_at=last_checkin_at,
-            down_since=down_since,
-            status_since=status_since,
+            last_checkin_at=effective_last_checkin_at,
+            down_since=effective_down_since,
+            status_since=effective_status_since,
         )
 
     async def mark_monitor_down_if_unchanged(
@@ -1313,171 +1741,433 @@ class Database:
             except Exception:
                 logger.debug("Failed to create index: %s", index_sql, exc_info=True)
 
-    async def compress_old_data(self) -> dict[str, int]:
-        retention_days = settings.DATA_RETENTION_DAYS
-        cutoff = utcnow() - timedelta(days=retention_days)
-        cutoff_ts = cutoff.timestamp()
-        results: dict[str, int] = {}
+    @staticmethod
+    def make_compression_job_id(
+        monitor_kind: str,
+        monitor_id: uuid.UUID | str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> str:
+        return (
+            f"compress:{monitor_kind}:{monitor_id}:"
+            f"{window_start.isoformat()}:{window_end.isoformat()}"
+        )
+
+    @staticmethod
+    def _compression_window_for_day(
+        day_value: date,
+        cutoff: datetime,
+    ) -> tuple[datetime, datetime] | None:
+        start_dt = datetime(day_value.year, day_value.month, day_value.day)
+        end_dt = min(start_dt + timedelta(days=1), cutoff)
+        if end_dt <= start_dt:
+            return None
+        return start_dt, end_dt
+
+    @staticmethod
+    def _parse_affected_rows(tag: str | None) -> int:
+        return int(tag.split()[-1]) if tag else 0
+
+    async def discover_overdue_compression_jobs(self, cutoff: datetime) -> list[CompressionJob]:
+        if not self.pool:
+            return []
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT monitor_kind, monitor_id, day
+                  FROM (
+                        SELECT 'server'::text AS monitor_kind,
+                               sh.server_id AS monitor_id,
+                               DATE(sh.timestamp) AS day
+                          FROM server_history sh
+                         WHERE sh.timestamp < $1
+                         GROUP BY sh.server_id, DATE(sh.timestamp)
+                        UNION
+                        SELECT 'server'::text AS monitor_kind,
+                               mm.monitor_id AS monitor_id,
+                               DATE(mm.minute) AS day
+                          FROM monitor_minutes mm
+                          JOIN server_monitors sm ON sm.id = mm.monitor_id
+                         WHERE mm.minute < $1
+                         GROUP BY mm.monitor_id, DATE(mm.minute)
+                        UNION
+                        SELECT 'uptime'::text AS monitor_kind,
+                               uc.monitor_id AS monitor_id,
+                               DATE(uc.checked_at) AS day
+                          FROM uptime_checks uc
+                         WHERE uc.checked_at < $1
+                         GROUP BY uc.monitor_id, DATE(uc.checked_at)
+                        UNION
+                        SELECT 'uptime'::text AS monitor_kind,
+                               mm.monitor_id AS monitor_id,
+                               DATE(mm.minute) AS day
+                          FROM monitor_minutes mm
+                          JOIN uptime_monitors um ON um.id = mm.monitor_id
+                         WHERE mm.minute < $1
+                         GROUP BY mm.monitor_id, DATE(mm.minute)
+                        UNION
+                        SELECT 'heartbeat'::text AS monitor_kind,
+                               hp.monitor_id AS monitor_id,
+                               DATE(hp.pinged_at) AS day
+                          FROM heartbeat_pings hp
+                         WHERE hp.pinged_at < $1
+                         GROUP BY hp.monitor_id, DATE(hp.pinged_at)
+                        UNION
+                        SELECT 'heartbeat'::text AS monitor_kind,
+                               mm.monitor_id AS monitor_id,
+                               DATE(mm.minute) AS day
+                          FROM monitor_minutes mm
+                          JOIN heartbeat_monitors hm ON hm.id = mm.monitor_id
+                         WHERE mm.minute < $1
+                         GROUP BY mm.monitor_id, DATE(mm.minute)
+                       ) overdue
+                 ORDER BY day ASC, monitor_kind ASC, monitor_id ASC
+                """,
+                cutoff,
+            )
+
+        seen: set[str] = set()
+        jobs: list[CompressionJob] = []
+        for row in rows:
+            window = self._compression_window_for_day(row["day"], cutoff)
+            if window is None:
+                continue
+            window_start, window_end = window
+            job_id = self.make_compression_job_id(
+                row["monitor_kind"],
+                row["monitor_id"],
+                window_start,
+                window_end,
+            )
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            jobs.append(
+                CompressionJob(
+                    job_id=job_id,
+                    monitor_kind=str(row["monitor_kind"]),
+                    monitor_id=row["monitor_id"],
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+            )
+        return jobs
+
+    async def _compress_server_history_window(
+        self,
+        conn,
+        monitor_id: uuid.UUID,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> int:
+        await conn.execute(
+            """
+            INSERT INTO server_history_daily (
+                server_id, date,
+                avg_cpu_percent, avg_cpu_io_wait, avg_cpu_steal,
+                avg_cpu_user, avg_cpu_system,
+                avg_ram_percent, avg_ram_swap_percent,
+                avg_ram_buff_percent, avg_ram_cache_percent,
+                avg_load_1, avg_load_5, avg_load_15,
+                total_network_in, total_network_out,
+                avg_network_in, avg_network_out,
+                avg_disk_percent, record_count
+            )
+            SELECT
+                server_id, DATE(timestamp),
+                AVG(cpu_percent), AVG(cpu_io_wait), AVG(cpu_steal),
+                AVG(cpu_user), AVG(cpu_system),
+                AVG(ram_percent), AVG(ram_swap_percent),
+                AVG(ram_buff_percent), AVG(ram_cache_percent),
+                AVG(load_1), AVG(load_5), AVG(load_15),
+                SUM(network_in), SUM(network_out),
+                AVG(network_in), AVG(network_out),
+                AVG(disk_percent), COUNT(*)
+            FROM server_history
+            WHERE server_id = $1
+              AND timestamp >= $2
+              AND timestamp < $3
+            GROUP BY server_id, DATE(timestamp)
+            ON CONFLICT (server_id, date) DO UPDATE SET
+                avg_cpu_percent = EXCLUDED.avg_cpu_percent,
+                avg_cpu_io_wait = EXCLUDED.avg_cpu_io_wait,
+                avg_cpu_steal = EXCLUDED.avg_cpu_steal,
+                avg_cpu_user = EXCLUDED.avg_cpu_user,
+                avg_cpu_system = EXCLUDED.avg_cpu_system,
+                avg_ram_percent = EXCLUDED.avg_ram_percent,
+                avg_ram_swap_percent = EXCLUDED.avg_ram_swap_percent,
+                avg_ram_buff_percent = EXCLUDED.avg_ram_buff_percent,
+                avg_ram_cache_percent = EXCLUDED.avg_ram_cache_percent,
+                avg_load_1 = EXCLUDED.avg_load_1,
+                avg_load_5 = EXCLUDED.avg_load_5,
+                avg_load_15 = EXCLUDED.avg_load_15,
+                total_network_in = EXCLUDED.total_network_in,
+                total_network_out = EXCLUDED.total_network_out,
+                avg_network_in = EXCLUDED.avg_network_in,
+                avg_network_out = EXCLUDED.avg_network_out,
+                avg_disk_percent = EXCLUDED.avg_disk_percent,
+                record_count = EXCLUDED.record_count
+            """,
+            monitor_id,
+            window_start,
+            window_end,
+        )
+        tag = await conn.execute(
+            """
+            DELETE FROM server_history
+             WHERE server_id = $1
+               AND timestamp >= $2
+               AND timestamp < $3
+            """,
+            monitor_id,
+            window_start,
+            window_end,
+        )
+        return self._parse_affected_rows(tag)
+
+    async def _compress_uptime_checks_window(
+        self,
+        conn,
+        monitor_id: uuid.UUID,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> int:
+        await conn.execute(
+            """
+            INSERT INTO uptime_checks_daily (
+                monitor_id, date,
+                up_count, down_count, total_count,
+                avg_response_time_ms
+            )
+            SELECT
+                monitor_id, DATE(checked_at),
+                COUNT(*) FILTER (WHERE status = 'up'),
+                COUNT(*) FILTER (WHERE status <> 'up'),
+                COUNT(*),
+                AVG(response_time_ms)
+            FROM uptime_checks
+            WHERE monitor_id = $1
+              AND checked_at >= $2
+              AND checked_at < $3
+            GROUP BY monitor_id, DATE(checked_at)
+            ON CONFLICT (monitor_id, date) DO UPDATE SET
+                up_count = EXCLUDED.up_count,
+                down_count = EXCLUDED.down_count,
+                total_count = EXCLUDED.total_count,
+                avg_response_time_ms = EXCLUDED.avg_response_time_ms
+            """,
+            monitor_id,
+            window_start,
+            window_end,
+        )
+        tag = await conn.execute(
+            """
+            DELETE FROM uptime_checks
+             WHERE monitor_id = $1
+               AND checked_at >= $2
+               AND checked_at < $3
+            """,
+            monitor_id,
+            window_start,
+            window_end,
+        )
+        return self._parse_affected_rows(tag)
+
+    async def _compress_heartbeat_pings_window(
+        self,
+        conn,
+        monitor_id: uuid.UUID,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> int:
+        await conn.execute(
+            """
+            INSERT INTO heartbeat_pings_daily (
+                monitor_id, date, ping_count
+            )
+            SELECT
+                monitor_id, DATE(pinged_at), COUNT(*)
+            FROM heartbeat_pings
+            WHERE monitor_id = $1
+              AND pinged_at >= $2
+              AND pinged_at < $3
+            GROUP BY monitor_id, DATE(pinged_at)
+            ON CONFLICT (monitor_id, date) DO UPDATE SET
+                ping_count = EXCLUDED.ping_count
+            """,
+            monitor_id,
+            window_start,
+            window_end,
+        )
+        tag = await conn.execute(
+            """
+            DELETE FROM heartbeat_pings
+             WHERE monitor_id = $1
+               AND pinged_at >= $2
+               AND pinged_at < $3
+            """,
+            monitor_id,
+            window_start,
+            window_end,
+        )
+        return self._parse_affected_rows(tag)
+
+    async def _compress_monitor_minutes_window(
+        self,
+        conn,
+        monitor_id: uuid.UUID,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> int:
+        await conn.execute(
+            """
+            INSERT INTO monitor_minutes_daily (
+                monitor_id, date,
+                up_minutes, down_minutes, maintenance_minutes
+            )
+            SELECT
+                monitor_id, DATE(minute),
+                COUNT(*) FILTER (WHERE status = 'up'),
+                COUNT(*) FILTER (WHERE status = 'down'),
+                COUNT(*) FILTER (WHERE status = 'maintenance')
+            FROM monitor_minutes
+            WHERE monitor_id = $1
+              AND minute >= $2
+              AND minute < $3
+            GROUP BY monitor_id, DATE(minute)
+            ON CONFLICT (monitor_id, date) DO UPDATE SET
+                up_minutes = EXCLUDED.up_minutes,
+                down_minutes = EXCLUDED.down_minutes,
+                maintenance_minutes = EXCLUDED.maintenance_minutes
+            """,
+            monitor_id,
+            window_start,
+            window_end,
+        )
+        tag = await conn.execute(
+            """
+            DELETE FROM monitor_minutes
+             WHERE monitor_id = $1
+               AND minute >= $2
+               AND minute < $3
+            """,
+            monitor_id,
+            window_start,
+            window_end,
+        )
+        return self._parse_affected_rows(tag)
+
+    async def _trim_compressed_cache_ranges(
+        self,
+        monitor_kind: str,
+        monitor_id: str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> None:
+        if not (self.cache_enabled and self.cache_service):
+            return
+
+        start_score = float(window_start.timestamp())
+        end_score = float(window_end.timestamp()) - 0.000001
+        if end_score < start_score:
+            return
+
+        try:
+            if monitor_kind == "server":
+                await self.cache_service.delete_series_range(
+                    "server_history",
+                    monitor_id,
+                    end_score,
+                    min_score=start_score,
+                )
+            elif monitor_kind == "uptime":
+                await self.cache_service.delete_series_range(
+                    "uptime_checks",
+                    monitor_id,
+                    end_score,
+                    min_score=start_score,
+                )
+            elif monitor_kind == "heartbeat":
+                await self.cache_service.delete_series_range(
+                    "heartbeat_pings",
+                    monitor_id,
+                    end_score,
+                    min_score=start_score,
+                )
+
+            await self.cache_service.delete_series_range(
+                "monitor_minutes",
+                monitor_id,
+                end_score,
+                min_score=start_score,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to trim Redis series after compression kind=%s monitor=%s: %s",
+                monitor_kind,
+                monitor_id,
+                exc,
+            )
+
+    async def compress_monitor_window(
+        self,
+        monitor_kind: str,
+        monitor_id: uuid.UUID | str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> dict[str, int]:
+        if not self.pool or window_end <= window_start:
+            return {}
+
+        normalized_kind = str(monitor_kind or "").strip().lower().replace("-", "_")
+        if normalized_kind not in {"uptime", "server", "heartbeat"}:
+            raise ValueError(f"Unsupported compression monitor kind: {monitor_kind}")
+
+        monitor_uuid = monitor_id if isinstance(monitor_id, uuid.UUID) else uuid.UUID(str(monitor_id))
+        results = {
+            "server_history": 0,
+            "uptime_checks": 0,
+            "heartbeat_pings": 0,
+            "monitor_minutes": 0,
+        }
 
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(
-                    """
-                    INSERT INTO server_history_daily (
-                        server_id, date,
-                        avg_cpu_percent, avg_cpu_io_wait, avg_cpu_steal,
-                        avg_cpu_user, avg_cpu_system,
-                        avg_ram_percent, avg_ram_swap_percent,
-                        avg_ram_buff_percent, avg_ram_cache_percent,
-                        avg_load_1, avg_load_5, avg_load_15,
-                        total_network_in, total_network_out,
-                        avg_network_in, avg_network_out,
-                        avg_disk_percent, record_count
+                if normalized_kind == "server":
+                    results["server_history"] = await self._compress_server_history_window(
+                        conn,
+                        monitor_uuid,
+                        window_start,
+                        window_end,
                     )
-                    SELECT
-                        server_id, DATE(timestamp),
-                        AVG(cpu_percent), AVG(cpu_io_wait), AVG(cpu_steal),
-                        AVG(cpu_user), AVG(cpu_system),
-                        AVG(ram_percent), AVG(ram_swap_percent),
-                        AVG(ram_buff_percent), AVG(ram_cache_percent),
-                        AVG(load_1), AVG(load_5), AVG(load_15),
-                        SUM(network_in), SUM(network_out),
-                        AVG(network_in), AVG(network_out),
-                        AVG(disk_percent), COUNT(*)
-                    FROM server_history
-                    WHERE timestamp < $1
-                    GROUP BY server_id, DATE(timestamp)
-                    ON CONFLICT (server_id, date) DO UPDATE SET
-                        avg_cpu_percent = EXCLUDED.avg_cpu_percent,
-                        avg_cpu_io_wait = EXCLUDED.avg_cpu_io_wait,
-                        avg_cpu_steal = EXCLUDED.avg_cpu_steal,
-                        avg_cpu_user = EXCLUDED.avg_cpu_user,
-                        avg_cpu_system = EXCLUDED.avg_cpu_system,
-                        avg_ram_percent = EXCLUDED.avg_ram_percent,
-                        avg_ram_swap_percent = EXCLUDED.avg_ram_swap_percent,
-                        avg_ram_buff_percent = EXCLUDED.avg_ram_buff_percent,
-                        avg_ram_cache_percent = EXCLUDED.avg_ram_cache_percent,
-                        avg_load_1 = EXCLUDED.avg_load_1,
-                        avg_load_5 = EXCLUDED.avg_load_5,
-                        avg_load_15 = EXCLUDED.avg_load_15,
-                        total_network_in = EXCLUDED.total_network_in,
-                        total_network_out = EXCLUDED.total_network_out,
-                        avg_network_in = EXCLUDED.avg_network_in,
-                        avg_network_out = EXCLUDED.avg_network_out,
-                        avg_disk_percent = EXCLUDED.avg_disk_percent,
-                        record_count = EXCLUDED.record_count
-                    """,
-                    cutoff,
-                )
-                tag = await conn.execute(
-                    "DELETE FROM server_history WHERE timestamp < $1", cutoff
-                )
-                results["server_history"] = int(tag.split()[-1]) if tag else 0
-
-                await conn.execute(
-                    """
-                    INSERT INTO uptime_checks_daily (
-                        monitor_id, date,
-                        up_count, down_count, total_count,
-                        avg_response_time_ms
+                elif normalized_kind == "uptime":
+                    results["uptime_checks"] = await self._compress_uptime_checks_window(
+                        conn,
+                        monitor_uuid,
+                        window_start,
+                        window_end,
                     )
-                    SELECT
-                        monitor_id, DATE(checked_at),
-                        COUNT(*) FILTER (WHERE status = 'up'),
-                        COUNT(*) FILTER (WHERE status <> 'up'),
-                        COUNT(*),
-                        AVG(response_time_ms)
-                    FROM uptime_checks
-                    WHERE checked_at < $1
-                    GROUP BY monitor_id, DATE(checked_at)
-                    ON CONFLICT (monitor_id, date) DO UPDATE SET
-                        up_count = EXCLUDED.up_count,
-                        down_count = EXCLUDED.down_count,
-                        total_count = EXCLUDED.total_count,
-                        avg_response_time_ms = EXCLUDED.avg_response_time_ms
-                    """,
-                    cutoff,
-                )
-                tag = await conn.execute(
-                    "DELETE FROM uptime_checks WHERE checked_at < $1", cutoff
-                )
-                results["uptime_checks"] = int(tag.split()[-1]) if tag else 0
-
-                await conn.execute(
-                    """
-                    INSERT INTO heartbeat_pings_daily (
-                        monitor_id, date, ping_count
+                else:
+                    results["heartbeat_pings"] = await self._compress_heartbeat_pings_window(
+                        conn,
+                        monitor_uuid,
+                        window_start,
+                        window_end,
                     )
-                    SELECT
-                        monitor_id, DATE(pinged_at), COUNT(*)
-                    FROM heartbeat_pings
-                    WHERE pinged_at < $1
-                    GROUP BY monitor_id, DATE(pinged_at)
-                    ON CONFLICT (monitor_id, date) DO UPDATE SET
-                        ping_count = EXCLUDED.ping_count
-                    """,
-                    cutoff,
+
+                results["monitor_minutes"] = await self._compress_monitor_minutes_window(
+                    conn,
+                    monitor_uuid,
+                    window_start,
+                    window_end,
                 )
-                tag = await conn.execute(
-                    "DELETE FROM heartbeat_pings WHERE pinged_at < $1", cutoff
-                )
-                results["heartbeat_pings"] = int(tag.split()[-1]) if tag else 0
 
-                await conn.execute(
-                    """
-                    INSERT INTO monitor_minutes_daily (
-                        monitor_id, date,
-                        up_minutes, down_minutes, maintenance_minutes
-                    )
-                    SELECT
-                        monitor_id, DATE(minute),
-                        COUNT(*) FILTER (WHERE status = 'up'),
-                        COUNT(*) FILTER (WHERE status = 'down'),
-                        COUNT(*) FILTER (WHERE status = 'maintenance')
-                    FROM monitor_minutes
-                    WHERE minute < $1
-                    GROUP BY monitor_id, DATE(minute)
-                    ON CONFLICT (monitor_id, date) DO UPDATE SET
-                        up_minutes = EXCLUDED.up_minutes,
-                        down_minutes = EXCLUDED.down_minutes,
-                        maintenance_minutes = EXCLUDED.maintenance_minutes
-                    """,
-                    cutoff,
-                )
-                tag = await conn.execute(
-                    "DELETE FROM monitor_minutes WHERE minute < $1", cutoff
-                )
-                results["monitor_minutes"] = int(tag.split()[-1]) if tag else 0
-
-        if self.cache_enabled and self.cache_service:
-            try:
-                for monitor_data in await self.cache_service.list_entities("server"):
-                    mid = str(monitor_data.get("id", ""))
-                    if mid:
-                        await self.cache_service.delete_series_range(
-                            "server_history", mid, cutoff_ts
-                        )
-
-                for monitor_data in await self.cache_service.list_entities("uptime"):
-                    mid = str(monitor_data.get("id", ""))
-                    if mid:
-                        await self.cache_service.delete_series_range(
-                            "uptime_checks", mid, cutoff_ts
-                        )
-
-                for monitor_data in await self.cache_service.list_entities("heartbeat"):
-                    mid = str(monitor_data.get("id", ""))
-                    if mid:
-                        await self.cache_service.delete_series_range(
-                            "heartbeat_pings", mid, cutoff_ts
-                        )
-            except Exception as exc:
-                logger.warning("Failed to trim Redis series during compression: %s", exc)
-
-        logger.info(
-            "Data compression complete (retention=%dd): %s",
-            retention_days,
-            ", ".join(f"{k}={v}" for k, v in results.items()),
+        await self._trim_compressed_cache_ranges(
+            normalized_kind,
+            str(monitor_uuid),
+            window_start,
+            window_end,
         )
         return results
 
@@ -1567,7 +2257,8 @@ class Database:
                 if cached:
                     self._apply_maintenance_to_list([cached])
                     return dict(cached)
-                return None
+                if not self._allow_db_fallback_on_cache_miss():
+                    return None
             except CacheUnavailableError:
                 pass
         if self.cache_only:
@@ -1776,208 +2467,70 @@ class Database:
 
 
     async def get_uptime_stats(self, monitor_id: uuid.UUID, days: int = 90) -> dict:
-        if self.cache_enabled and self.cache_service:
-            try:
-                now = utcnow()
-                cutoff = now - timedelta(days=days)
-                checks = await self.cache_service.range_series(
-                    "uptime_checks", str(monitor_id),
-                    cutoff.timestamp(), now.timestamp(),
-                )
-                total = 0
-                up = 0
-                down = 0
-                rt_sum = 0
-                rt_count = 0
-                for row in checks:
-                    checked_at = row.get("checked_at")
-                    if not checked_at or checked_at <= cutoff:
-                        continue
-                    total += 1
-                    status = str(row.get("status") or "").lower()
-                    if status == "up":
-                        up += 1
-                        rt = row.get("response_time_ms")
-                        if rt is not None:
-                            rt_sum += rt
-                            rt_count += 1
-                    else:
-                        down += 1
-                avg_rt = (rt_sum / rt_count) if rt_count else None
-                return {
-                    "up_count": up,
-                    "down_count": down,
-                    "total_count": total,
-                    "avg_response_time": avg_rt
-                }
-            except CacheUnavailableError:
-                pass
-        if self.cache_only:
-            return {}
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """SELECT
-                    COUNT(*) FILTER (WHERE status = 'up') as up_count,
-                    COUNT(*) FILTER (WHERE status != 'up') as down_count,
-                    COUNT(*) as total_count,
-                    AVG(response_time_ms) FILTER (WHERE status = 'up') as avg_response_time
-                   FROM uptime_checks
-                   WHERE monitor_id = $1
-                   AND checked_at > CURRENT_TIMESTAMP - INTERVAL '1 day' * $2""",
-                monitor_id, days
-            )
-            return dict(row) if row else {}
-
-
-    async def get_uptime_multi_period_stats(self, monitor_id: uuid.UUID) -> dict:
-        """Get all uptime stats (24h, 7d, 30d, year, total) combining recent + daily data."""
         now = utcnow()
-        start_24h = now - timedelta(hours=24)
-        start_7d = now - timedelta(days=7)
-        start_30d = now - timedelta(days=30)
-        start_year = datetime(now.year, 1, 1)
+        cutoff = now - timedelta(days=days)
+        retention_cutoff_date = _server_history_retention_cutoff(now).date()
+        checks = await self._get_uptime_check_rows(monitor_id, start=cutoff, end=now)
 
-        total_24h = up_24h = 0
-        total_7d = up_7d = 0
-        total_30d = up_30d = 0
-        total_year = up_year = 0
-        total_all = up_all = 0
-        first_check: datetime | None = None
-        rt_sum_all = 0.0
-        rt_count_all = 0
+        total = 0
+        up = 0
+        down = 0
+        rt_sum = 0.0
+        rt_count = 0
+        raw_dates: set[date] = set()
 
-        # Recent detailed data from cache.
-        if self.cache_enabled and self.cache_service:
-            try:
-                checks = await self.cache_service.range_series(
-                    "uptime_checks", str(monitor_id), 0, now.timestamp(),
-                )
-            except CacheUnavailableError:
-                checks = []
-            for row in checks:
-                checked_at = row.get("checked_at")
-                if not checked_at:
-                    continue
-                status = str(row.get("status") or "").lower()
-                total_all += 1
-                if first_check is None or checked_at < first_check:
-                    first_check = checked_at
-                if status == "up":
-                    up_all += 1
-                    rt = row.get("response_time_ms")
-                    if rt is not None:
-                        try:
-                            rt_sum_all += float(rt)
-                            rt_count_all += 1
-                        except Exception:
-                            pass
-                if checked_at >= start_24h:
-                    total_24h += 1
-                    if status == "up":
-                        up_24h += 1
-                if checked_at >= start_7d:
-                    total_7d += 1
-                    if status == "up":
-                        up_7d += 1
-                if checked_at >= start_30d:
-                    total_30d += 1
-                    if status == "up":
-                        up_30d += 1
-                if checked_at >= start_year:
-                    total_year += 1
-                    if status == "up":
-                        up_year += 1
+        for row in checks:
+            checked_at = row.get("checked_at")
+            if not checked_at or checked_at < cutoff or checked_at >= now:
+                continue
+            raw_dates.add(checked_at.date())
+            total += 1
+            status = str(row.get("status") or "").lower()
+            if status == "up":
+                up += 1
+                rt = row.get("response_time_ms")
+                if rt is not None:
+                    try:
+                        rt_sum += float(rt)
+                        rt_count += 1
+                    except Exception:
+                        pass
+            else:
+                down += 1
 
-        # Daily summary data from PostgreSQL for older periods.
-        if self.pool:
-            try:
-                async with self.pool.acquire() as conn:
-                    daily_rows = await conn.fetch(
-                        "SELECT date, up_count, down_count, total_count, avg_response_time_ms "
-                        "FROM uptime_checks_daily WHERE monitor_id = $1",
-                        monitor_id,
-                    )
-                    for dr in daily_rows:
-                        d = dr["date"]
-                        up = int(dr["up_count"] or 0)
-                        total = int(dr["total_count"] or 0)
-                        avg_rt = dr["avg_response_time_ms"]
-                        day_dt = datetime(d.year, d.month, d.day)
-
-                        total_all += total
-                        up_all += up
-                        if avg_rt is not None and total > 0:
-                            rt_sum_all += float(avg_rt) * up
-                            rt_count_all += up
-                        if first_check is None or day_dt < first_check:
-                            first_check = day_dt
-
-                        if day_dt >= start_30d:
-                            total_30d += total
-                            up_30d += up
-                        if day_dt >= start_year:
-                            total_year += total
-                            up_year += up
-            except Exception:
-                logger.exception("Failed to fetch uptime daily summaries")
-
-        if not self.cache_enabled and not self.cache_service and not self.cache_only and self.pool:
+        if not self.cache_only and self.pool:
             async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    """SELECT
-                        COUNT(*) FILTER (
-                            WHERE checked_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
-                        ) as total_24h,
-                        COUNT(*) FILTER (
-                            WHERE checked_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
-                            AND status = 'up'
-                        ) as up_24h,
-                        COUNT(*) FILTER (
-                            WHERE checked_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
-                        ) as total_7d,
-                        COUNT(*) FILTER (
-                            WHERE checked_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
-                            AND status = 'up'
-                        ) as up_7d,
-                        COUNT(*) FILTER (
-                            WHERE checked_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
-                        ) as total_30d,
-                        COUNT(*) FILTER (
-                            WHERE checked_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
-                            AND status = 'up'
-                        ) as up_30d,
-                        COUNT(*) FILTER (
-                            WHERE checked_at >= date_trunc('year', CURRENT_TIMESTAMP)
-                        ) as total_year,
-                        COUNT(*) FILTER (
-                            WHERE checked_at >= date_trunc('year', CURRENT_TIMESTAMP)
-                            AND status = 'up'
-                        ) as up_year,
-                        COUNT(*) as total_all,
-                        COUNT(*) FILTER (WHERE status = 'up') as up_all,
-                        MIN(checked_at) as first_check,
-                        AVG(response_time_ms) FILTER (WHERE status = 'up') as avg_response_time_all
-                       FROM uptime_checks
-                       WHERE monitor_id = $1""",
-                    monitor_id
+                daily_rows = await conn.fetch(
+                    """SELECT date, up_count, down_count, total_count, avg_response_time_ms
+                       FROM uptime_checks_daily
+                       WHERE monitor_id = $1
+                         AND date >= $2
+                       ORDER BY date ASC""",
+                    monitor_id,
+                    cutoff.date(),
                 )
-                return dict(row) if row else {}
+                for row in daily_rows:
+                    day_value = row["date"]
+                    if day_value in raw_dates and day_value != retention_cutoff_date:
+                        continue
+                    day_total = int(row["total_count"] or 0)
+                    day_up = int(row["up_count"] or 0)
+                    day_down = int(row["down_count"] or max(0, day_total - day_up))
+                    total += day_total
+                    up += day_up
+                    down += day_down
+                    avg_rt = row["avg_response_time_ms"]
+                    if avg_rt is not None and day_up > 0:
+                        rt_sum += float(avg_rt) * day_up
+                        rt_count += day_up
 
+        avg_rt = (rt_sum / rt_count) if rt_count else None
         return {
-            "total_24h": total_24h,
-            "up_24h": up_24h,
-            "total_7d": total_7d,
-            "up_7d": up_7d,
-            "total_30d": total_30d,
-            "up_30d": up_30d,
-            "total_year": total_year,
-            "up_year": up_year,
-            "total_all": total_all,
-            "up_all": up_all,
-            "first_check": first_check,
-            "avg_response_time_all": (rt_sum_all / rt_count_all) if rt_count_all else None,
+            "up_count": up,
+            "down_count": down,
+            "total_count": total,
+            "avg_response_time": avg_rt,
         }
-
     async def get_server_monitors(self, enabled_only: bool = False, public_only: bool = False) -> list[dict]:
         if self.cache_enabled and self.cache_service:
             try:
@@ -2025,7 +2578,8 @@ class Database:
                     self._apply_maintenance_to_list([cached])
                     cached["status"] = cached.get("status", "unknown")
                     return dict(cached)
-                return None
+                if not self._allow_db_fallback_on_cache_miss():
+                    return None
             except CacheUnavailableError:
                 pass
         if self.cache_only:
@@ -2307,214 +2861,84 @@ class Database:
             return history_id
 
     async def get_server_history(self, server_id: uuid.UUID, hours: int = 24, limit: int = None) -> list[dict]:
-        if self.cache_enabled and self.cache_service:
-            try:
-                if limit:
-                    items = await self.cache_service.tail_series(
-                        "server_history", str(server_id), limit,
-                    )
-                else:
-                    now = utcnow()
-                    cutoff = now - timedelta(hours=hours)
-                    items = await self.cache_service.range_series(
-                        "server_history", str(server_id),
-                        cutoff.timestamp(), now.timestamp(),
-                    )
-                    items.sort(key=lambda r: r.get("timestamp") or datetime.min)
-                return [dict(row) for row in items]
-            except CacheUnavailableError:
-                pass
-        if self.cache_only:
-            return []
-        async with self.pool.acquire() as conn:
-            if limit:
-                rows = await conn.fetch(
-                    """SELECT * FROM server_history
-                       WHERE server_id = $1
-                       ORDER BY timestamp DESC
-                       LIMIT $2""",
-                    server_id, limit
-                )
-            else:
-                rows = await conn.fetch(
-                    """SELECT * FROM server_history
-                       WHERE server_id = $1
-                       AND timestamp > CURRENT_TIMESTAMP - INTERVAL '1 hour' * $2
-                       ORDER BY timestamp ASC""",
-                    server_id, hours
-                )
-            return [dict(row) for row in rows]
+        now = utcnow()
+        cutoff = now - timedelta(hours=hours)
+        return await self._get_server_history_rows(
+            server_id,
+            start=None if limit else cutoff,
+            end=None if limit else now,
+            limit=limit,
+        )
 
     async def get_server_history_range(self, server_id: uuid.UUID, start: datetime, end: datetime) -> list[dict]:
-        if self.cache_enabled and self.cache_service:
-            try:
-                items = await self.cache_service.range_series(
-                    "server_history", str(server_id),
-                    start.timestamp(), end.timestamp(),
-                )
-                items.sort(key=lambda r: r.get("timestamp") or datetime.min)
-                return [dict(row) for row in items]
-            except CacheUnavailableError:
-                pass
-        if self.cache_only:
+        if start >= end:
             return []
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT * FROM server_history
-                   WHERE server_id = $1
-                   AND timestamp >= $2 AND timestamp < $3
-                   ORDER BY timestamp ASC""",
-                server_id, start, end
-            )
-            return [dict(row) for row in rows]
+
+        recent_cutoff = _server_history_retention_cutoff()
+        if start >= recent_cutoff:
+            return await self._get_server_history_rows(server_id, start=start, end=end)
+
+        daily_end = min(end, recent_cutoff)
+        daily_rows = await self._get_server_history_daily_rows(
+            server_id,
+            start,
+            daily_end,
+            include_start_partial_day=True,
+            include_end_partial_day=True,
+        )
+
+        raw_rows: list[dict] = []
+        raw_start = max(start, recent_cutoff)
+        if raw_start < end:
+            raw_rows = await self._get_server_history_rows(server_id, start=raw_start, end=end)
+
+        result = daily_rows + raw_rows
+        result.sort(key=lambda row: row.get("timestamp") or datetime.min)
+        return _strip_server_history_internal_fields(result)
 
     async def get_server_history_aggregated(self, server_id: uuid.UUID, hours: int = 24, interval: str = 'hour') -> list[dict]:
         """
         Get aggregated server history for longer time ranges.
         Interval can be '15min', 'hour', or 'day'.
-        Combines recent detailed data from cache with daily summaries for older periods.
         """
-        metrics = [
-            "cpu_percent", "cpu_io_wait", "cpu_steal", "cpu_user", "cpu_system",
-            "ram_percent", "ram_swap_percent", "ram_buff_percent", "ram_cache_percent",
-            "load_1", "load_5", "load_15",
-            "network_in", "network_out", "disk_percent",
-        ]
+        now = utcnow()
+        start = now - timedelta(hours=hours)
 
-        if self.cache_enabled and self.cache_service:
-            now = utcnow()
-            cutoff = now - timedelta(hours=hours)
+        if interval != "day":
+            rows = await self._get_server_history_bucket_rows(server_id, start, now, interval)
+            return _strip_server_history_internal_fields(rows)
 
-            def bucket(ts: datetime) -> datetime:
-                if interval == '15min':
-                    return datetime(ts.year, ts.month, ts.day, ts.hour, (ts.minute // 15) * 15)
-                if interval == 'hour':
-                    return datetime(ts.year, ts.month, ts.day, ts.hour)
-                return datetime(ts.year, ts.month, ts.day)
+        recent_cutoff = _server_history_retention_cutoff(now)
+        if start >= recent_cutoff:
+            rows = await self._get_server_history_bucket_rows(server_id, start, now, "day")
+            return _strip_server_history_internal_fields(rows)
 
-            buckets: dict[datetime, dict[str, dict[str, float]]] = {}
+        daily_rows = await self._get_server_history_daily_rows(
+            server_id,
+            start,
+            recent_cutoff,
+            include_start_partial_day=True,
+            include_end_partial_day=True,
+        )
 
-            try:
-                history = await self.cache_service.range_series(
-                    "server_history", str(server_id),
-                    cutoff.timestamp(), now.timestamp(),
-                )
-            except CacheUnavailableError:
-                history = []
-            for row in history:
-                ts = row.get("timestamp")
-                if not ts or ts <= cutoff:
-                    continue
-                key = bucket(ts)
-                agg = buckets.setdefault(key, {m: {"sum": 0.0, "count": 0} for m in metrics})
-                for m in metrics:
-                    val = row.get(m)
-                    if val is None:
-                        continue
-                    agg[m]["sum"] += float(val)
-                    agg[m]["count"] += 1
+        raw_rows: list[dict] = []
+        raw_start = max(start, recent_cutoff)
+        if raw_start < now:
+            raw_rows = await self._get_server_history_bucket_rows(server_id, raw_start, now, "day")
 
-            # For day-level aggregation beyond retention, add daily summaries.
-            if interval == 'day' and self.pool:
-                retention_cutoff = now - timedelta(days=settings.DATA_RETENTION_DAYS)
-                if cutoff < retention_cutoff:
-                    try:
-                        async with self.pool.acquire() as conn:
-                            daily_rows = await conn.fetch(
-                                """SELECT date,
-                                    avg_cpu_percent, avg_cpu_io_wait, avg_cpu_steal,
-                                    avg_cpu_user, avg_cpu_system,
-                                    avg_ram_percent, avg_ram_swap_percent,
-                                    avg_ram_buff_percent, avg_ram_cache_percent,
-                                    avg_load_1, avg_load_5, avg_load_15,
-                                    avg_network_in, avg_network_out,
-                                    avg_disk_percent, record_count
-                                FROM server_history_daily
-                                WHERE server_id = $1 AND date >= $2
-                                ORDER BY date ASC""",
-                                server_id, cutoff.date(),
-                            )
-                            daily_metric_map = {
-                                "cpu_percent": "avg_cpu_percent",
-                                "cpu_io_wait": "avg_cpu_io_wait",
-                                "cpu_steal": "avg_cpu_steal",
-                                "cpu_user": "avg_cpu_user",
-                                "cpu_system": "avg_cpu_system",
-                                "ram_percent": "avg_ram_percent",
-                                "ram_swap_percent": "avg_ram_swap_percent",
-                                "ram_buff_percent": "avg_ram_buff_percent",
-                                "ram_cache_percent": "avg_ram_cache_percent",
-                                "load_1": "avg_load_1",
-                                "load_5": "avg_load_5",
-                                "load_15": "avg_load_15",
-                                "network_in": "avg_network_in",
-                                "network_out": "avg_network_out",
-                                "disk_percent": "avg_disk_percent",
-                            }
-                            for dr in daily_rows:
-                                d = dr["date"]
-                                day_key = datetime(d.year, d.month, d.day)
-                                if day_key in buckets:
-                                    continue
-                                cnt = int(dr["record_count"] or 1)
-                                agg = buckets.setdefault(day_key, {m: {"sum": 0.0, "count": 0} for m in metrics})
-                                for m in metrics:
-                                    col = daily_metric_map[m]
-                                    val = dr[col]
-                                    if val is not None:
-                                        agg[m]["sum"] += float(val) * cnt
-                                        agg[m]["count"] += cnt
-                    except Exception:
-                        logger.exception("Failed to fetch server history daily for aggregation")
-
-            result = []
-            for ts, agg in buckets.items():
-                row_out: dict[str, Any] = {"timestamp": ts}
-                for m in metrics:
-                    if agg[m]["count"]:
-                        row_out[m] = agg[m]["sum"] / agg[m]["count"]
-                    else:
-                        row_out[m] = None
-                result.append(row_out)
-            result.sort(key=lambda r: r.get("timestamp") or datetime.min)
-            return result
-
-        if self.cache_only:
-            return []
-        async with self.pool.acquire() as conn:
-            if interval == '15min':
-                bucket_expr = "date_trunc('hour', timestamp) + (floor(date_part('minute', timestamp) / 15)::int * interval '15 minutes')"
-            elif interval == 'hour':
-                bucket_expr = "date_trunc('hour', timestamp)"
+        merged_by_timestamp: dict[datetime, dict[str, Any]] = {}
+        for row in daily_rows + raw_rows:
+            timestamp = row.get("timestamp")
+            if not isinstance(timestamp, datetime):
+                continue
+            existing = merged_by_timestamp.get(timestamp)
+            if existing is None:
+                merged_by_timestamp[timestamp] = dict(row)
             else:
-                bucket_expr = "date_trunc('day', timestamp)"
+                merged_by_timestamp[timestamp] = _merge_server_history_rows(existing, row)
 
-            rows = await conn.fetch(
-                f"""SELECT
-                    {bucket_expr} as timestamp,
-                    AVG(cpu_percent) as cpu_percent,
-                    AVG(cpu_io_wait) as cpu_io_wait,
-                    AVG(cpu_steal) as cpu_steal,
-                    AVG(cpu_user) as cpu_user,
-                    AVG(cpu_system) as cpu_system,
-                    AVG(ram_percent) as ram_percent,
-                    AVG(ram_swap_percent) as ram_swap_percent,
-                    AVG(ram_buff_percent) as ram_buff_percent,
-                    AVG(ram_cache_percent) as ram_cache_percent,
-                    AVG(load_1) as load_1,
-                    AVG(load_5) as load_5,
-                    AVG(load_15) as load_15,
-                    AVG(network_in) as network_in,
-                    AVG(network_out) as network_out,
-                    AVG(disk_percent) as disk_percent
-                   FROM server_history
-                   WHERE server_id = $1
-                   AND timestamp > CURRENT_TIMESTAMP - INTERVAL '1 hour' * $2
-                   GROUP BY 1
-                   ORDER BY timestamp ASC""",
-                server_id, hours
-            )
-            return [dict(row) for row in rows]
+        result = [merged_by_timestamp[key] for key in sorted(merged_by_timestamp)]
+        return _strip_server_history_internal_fields(result)
 
 
     async def get_heartbeat_monitors(self, enabled_only: bool = False, public_only: bool = False) -> list[dict]:
@@ -2562,7 +2986,8 @@ class Database:
                     self._apply_maintenance_to_list([cached])
                     cached["status"] = cached.get("status", "unknown")
                     return dict(cached)
-                return None
+                if not self._allow_db_fallback_on_cache_miss():
+                    return None
             except CacheUnavailableError:
                 pass
         if self.cache_only:

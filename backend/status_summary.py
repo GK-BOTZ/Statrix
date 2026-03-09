@@ -163,7 +163,7 @@ class StatusSummaryService:
 
         async def _task():
             await asyncio.sleep(delay)
-            await self.warmup_from_pg(db, reason="startup_delayed")
+            await self.warmup_from_pg(db, reason="forced")
 
         self._delayed_warmup_task = loop.create_task(_task())
 
@@ -172,7 +172,7 @@ class StatusSummaryService:
             return False
         if self._ready:
             return True
-        self.trigger_warmup_from_pg(db, reason="on_demand")
+        self.trigger_rebuild_from_cache(db, reason="on_demand")
         if self._ready:
             return True
         timeout = max(0.0, float(wait_timeout_seconds))
@@ -184,7 +184,7 @@ class StatusSummaryService:
             return self._ready
         return self._ready
 
-    def trigger_warmup_from_pg(self, db, reason: str = "manual") -> None:
+    def trigger_rebuild_from_cache(self, db, reason: str = "manual") -> None:
         if not self.enabled:
             return
         if self._warmup_task and not self._warmup_task.done():
@@ -193,7 +193,7 @@ class StatusSummaryService:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._warmup_task = loop.create_task(self.warmup_from_pg(db, reason=reason))
+        self._warmup_task = loop.create_task(self.rebuild_from_redis(db))
 
     async def warmup_from_pg(self, db, reason: str = "manual") -> bool:
         if not self.enabled:
@@ -273,6 +273,24 @@ class StatusSummaryService:
         overall_uptime = round(sum(uptime_values) / len(uptime_values), 4) if uptime_values else None
         return {"overall_uptime": overall_uptime, "monitors": monitors}
 
+    async def get_monitor_summary(self, db, monitor_id: uuid.UUID | str) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+
+        monitor_id_s = str(monitor_id)
+        if self._ready:
+            await self._rollover_if_needed()
+            rec = self._records.get(monitor_id_s)
+            if rec is not None:
+                if self._backfill_first_data_at(rec):
+                    self._recompute_all_codes(rec)
+                return dict(rec)
+
+        rec = await self._load_one_from_redis(db, monitor_id_s)
+        if rec is not None and self._backfill_first_data_at(rec):
+            self._recompute_all_codes(rec)
+        return rec
+
     def note_monitor_registry_dirty(self) -> None:
         if not self.enabled:
             return
@@ -343,7 +361,10 @@ class StatusSummaryService:
             previous_status = str(rec.get("status") or "unknown").strip().lower() or "unknown"
             changed_at = status_since or down_since or last_checkin_at or utcnow()
             rec["status"] = status_value
-            rec["status_since"] = changed_at
+            if previous_status != status_value:
+                rec["status_since"] = changed_at
+            elif rec.get("status_since") is None:
+                rec["status_since"] = changed_at
             if status_value == "maintenance":
                 rec["maintenance_mode"] = True
             elif status_value in {"up", "down"}:
@@ -356,6 +377,7 @@ class StatusSummaryService:
                 rec["last_up_at"] = last_checkin_at or changed_at
             if previous_status != status_value:
                 self._append_today_segment(rec, status_value, changed_at)
+            self._backfill_first_data_at(rec)
         self._dirty_monitor_ids.add(monitor_id_s)
 
     def note_uptime_check(
@@ -418,6 +440,7 @@ class StatusSummaryService:
             "cpu_steal": metrics.get("cpu_steal"),
         }
         rec["last_report_at"] = reported_at
+        self._backfill_first_data_at(rec)
         self._dirty_monitor_ids.add(monitor_id_s)
 
     def note_heartbeat_ping(self, monitor_id: uuid.UUID, pinged_at: datetime) -> None:
@@ -461,7 +484,7 @@ class StatusSummaryService:
             dirty_ids.update(registry_ids)
 
         if dirty_ids:
-            await self._refresh_today_counts_from_pg(db, dirty_ids)
+            await self._refresh_recent_counts_from_pg(db, dirty_ids)
 
         if deleted_ids:
             await self._delete_ids_from_redis(db, deleted_ids)
@@ -548,7 +571,7 @@ class StatusSummaryService:
 
         return refreshed_ids
 
-    async def _refresh_today_counts_from_pg(self, db, dirty_ids: set[str]) -> None:
+    async def _refresh_recent_counts_from_pg(self, db, dirty_ids: set[str]) -> None:
         if not dirty_ids:
             return
         if not db.pool:
@@ -562,47 +585,88 @@ class StatusSummaryService:
         if not uuid_ids:
             return
 
-        today = self._current_day
-        start_dt = _utc_day_start(today)
-        end_dt = _utc_day_end(today)
+        start_day = self._days[0]
+        end_day = self._current_day
+        start_dt = _utc_day_start(start_day)
+        end_dt = _utc_day_end(end_day)
         try:
             async with db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT
                         monitor_id,
-                        COUNT(*) FILTER (WHERE status = 'up')::bigint AS up_minutes,
-                        COUNT(*) FILTER (WHERE status = 'down')::bigint AS down_minutes,
-                        COUNT(*) FILTER (WHERE status = 'maintenance')::bigint AS maintenance_minutes
-                    FROM monitor_minutes
-                    WHERE monitor_id = ANY($1::uuid[])
-                      AND minute >= $2
-                      AND minute < $3
-                    GROUP BY monitor_id
+                        day,
+                        SUM(up)::bigint AS up_minutes,
+                        SUM(down)::bigint AS down_minutes,
+                        SUM(maintenance)::bigint AS maintenance_minutes
+                    FROM (
+                        SELECT
+                            monitor_id,
+                            date AS day,
+                            up_minutes::bigint AS up,
+                            down_minutes::bigint AS down,
+                            maintenance_minutes::bigint AS maintenance
+                        FROM monitor_minutes_daily
+                        WHERE monitor_id = ANY($1::uuid[])
+                          AND date >= $2
+                          AND date < $3
+                        UNION ALL
+                        SELECT
+                            monitor_id,
+                            DATE(minute) AS day,
+                            COUNT(*) FILTER (WHERE status = 'up')::bigint AS up,
+                            COUNT(*) FILTER (WHERE status = 'down')::bigint AS down,
+                            COUNT(*) FILTER (WHERE status = 'maintenance')::bigint AS maintenance
+                        FROM monitor_minutes
+                        WHERE monitor_id = ANY($1::uuid[])
+                          AND minute >= $4
+                          AND minute < $5
+                        GROUP BY monitor_id, DATE(minute)
+                    ) t
+                    GROUP BY monitor_id, day
                     """,
                     uuid_ids,
+                    start_day,
+                    end_day,
                     start_dt,
                     end_dt,
                 )
         except Exception:
-            logger.debug("Status summary today-count refresh failed", exc_info=True)
+            logger.debug("Status summary recent-count refresh failed", exc_info=True)
             return
 
-        counts_map = {
-            str(row["monitor_id"]): {
+        counts_map: dict[str, dict[date, dict[str, int]]] = {}
+        for row in rows:
+            day_value = row.get("day")
+            if not isinstance(day_value, date):
+                continue
+            counts_map.setdefault(str(row["monitor_id"]), {})[day_value] = {
                 "up": int(row.get("up_minutes") or 0),
                 "down": int(row.get("down_minutes") or 0),
                 "maintenance": int(row.get("maintenance_minutes") or 0),
             }
-            for row in rows
-        }
+
+        day_index = {day_value: idx for idx, day_value in enumerate(self._days)}
 
         for monitor_id_s in dirty_ids:
             rec = self._records.get(monitor_id_s)
             if not rec:
                 continue
-            counts = counts_map.get(monitor_id_s) or {"up": 0, "down": 0, "maintenance": 0}
-            self._set_today_counts(rec, counts["up"], counts["down"], counts["maintenance"])
+            old_up = sum(int(value or 0) for value in _ensure_len(rec.get("up_minutes", []), self.day_slots, 0))
+            old_down = sum(int(value or 0) for value in _ensure_len(rec.get("down_minutes", []), self.day_slots, 0))
+            old_maintenance = sum(int(value or 0) for value in _ensure_len(rec.get("maintenance_minutes", []), self.day_slots, 0))
+            rec["up_minutes"] = [0] * self.day_slots
+            rec["down_minutes"] = [0] * self.day_slots
+            rec["maintenance_minutes"] = [0] * self.day_slots
+            self._apply_counts_to_record(rec, counts_map.get(monitor_id_s, {}), day_index)
+            new_up = sum(int(value or 0) for value in rec["up_minutes"])
+            new_down = sum(int(value or 0) for value in rec["down_minutes"])
+            new_maintenance = sum(int(value or 0) for value in rec["maintenance_minutes"])
+            rec["total_up"] = int(rec.get("total_up") or 0) - old_up + new_up
+            rec["total_down"] = int(rec.get("total_down") or 0) - old_down + new_down
+            rec["total_maintenance"] = int(rec.get("total_maintenance") or 0) - old_maintenance + new_maintenance
+            self._backfill_first_data_at(rec)
+            self._recompute_all_codes(rec)
 
     async def _persist_full_to_redis(self, db) -> None:
         cache = getattr(db, "cache_service", None)
@@ -719,6 +783,76 @@ class StatusSummaryService:
         await cache.set_prefixed_json(self._timeline_suffix(monitor_id_s), timeline_payload)
         await cache.add_prefixed_set_member(self._ids_suffix(), monitor_id_s)
 
+    def _day_list_from_meta(self, meta: dict[str, Any] | None) -> list[date]:
+        day_list: list[date] = []
+        raw_days = (meta or {}).get("days") if isinstance(meta, dict) else None
+        if isinstance(raw_days, list):
+            for raw in raw_days:
+                d = _as_date(raw)
+                if d:
+                    day_list.append(d)
+        if len(day_list) != self.day_slots:
+            today = utcnow().date()
+            day_list = [today - timedelta(days=i) for i in range(self.day_slots - 1, -1, -1)]
+        return day_list
+
+    def _deserialize_redis_record(
+        self,
+        monitor_id_s: str,
+        base_payload: dict[str, Any],
+        daily_payload: dict[str, Any] | None,
+        timeline_payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(base_payload, dict):
+            return None
+
+        monitor_kind = str(base_payload.get("monitor_kind") or "")
+        if monitor_kind not in {"uptime", "server", "heartbeat"}:
+            return None
+
+        rec = dict(base_payload)
+        rec["id"] = monitor_id_s
+        rec["created_at"] = _as_dt(rec.get("created_at"))
+        rec["status_since"] = _as_dt(rec.get("status_since"))
+        rec["first_data_at"] = _as_dt(rec.get("first_data_at"))
+        rec["last_check_at"] = _as_dt(rec.get("last_check_at"))
+        rec["last_up_at"] = _as_dt(rec.get("last_up_at"))
+        rec["last_ping_at"] = _as_dt(rec.get("last_ping_at"))
+        rec["last_report_at"] = _as_dt(rec.get("last_report_at"))
+        rec["last_checkin_at"] = _as_dt(rec.get("last_checkin_at"))
+
+        rec["codes"] = _ensure_len(list((daily_payload or {}).get("codes") or []), self.day_slots, _STATUS_CODE_NOT_CREATED)
+        rec["up_minutes"] = _ensure_len(list((daily_payload or {}).get("up_minutes") or []), self.day_slots, 0)
+        rec["down_minutes"] = _ensure_len(list((daily_payload or {}).get("down_minutes") or []), self.day_slots, 0)
+        rec["maintenance_minutes"] = _ensure_len(list((daily_payload or {}).get("maintenance_minutes") or []), self.day_slots, 0)
+        rec["today_segments"] = list((timeline_payload or {}).get("segments") or [])
+        for seg in rec["today_segments"]:
+            if isinstance(seg, dict):
+                seg["start_at"] = _as_dt(seg.get("start_at"))
+                seg["end_at"] = _as_dt(seg.get("end_at"))
+
+        rec["total_up"] = int(rec.get("total_up") or 0)
+        rec["total_down"] = int(rec.get("total_down") or 0)
+        rec["total_maintenance"] = int(rec.get("total_maintenance") or 0)
+        rec["rt_sum_up"] = float(rec.get("rt_sum_up") or 0.0)
+        rec["rt_count_up"] = int(rec.get("rt_count_up") or 0)
+        rec["metrics"] = rec.get("metrics") or {}
+        self._backfill_first_data_at(rec)
+        return rec
+
+    async def _load_one_from_redis(self, db, monitor_id_s: str) -> dict[str, Any] | None:
+        cache = getattr(db, "cache_service", None)
+        if not cache:
+            return None
+        try:
+            base_payload = await cache.get_prefixed_json(self._monitor_suffix(monitor_id_s)) or {}
+            daily_payload = await cache.get_prefixed_json(self._daily_suffix(monitor_id_s)) or {}
+            timeline_payload = await cache.get_prefixed_json(self._timeline_suffix(monitor_id_s)) or {}
+        except Exception:
+            logger.debug("Status summary Redis single-monitor read failed", exc_info=True)
+            return None
+        return self._deserialize_redis_record(monitor_id_s, base_payload, daily_payload, timeline_payload)
+
     async def _build_snapshot_from_redis(self, db) -> dict[str, Any] | None:
         cache = getattr(db, "cache_service", None)
         if not cache:
@@ -732,16 +866,7 @@ class StatusSummaryService:
         if not ids:
             return None
 
-        day_list: list[date] = []
-        raw_days = (meta or {}).get("days") if isinstance(meta, dict) else None
-        if isinstance(raw_days, list):
-            for raw in raw_days:
-                d = _as_date(raw)
-                if d:
-                    day_list.append(d)
-        if len(day_list) != self.day_slots:
-            today = utcnow().date()
-            day_list = [today - timedelta(days=i) for i in range(self.day_slots - 1, -1, -1)]
+        day_list = self._day_list_from_meta(meta)
 
         records: dict[str, dict[str, Any]] = {}
         for monitor_id_s in ids:
@@ -751,43 +876,16 @@ class StatusSummaryService:
                 timeline_payload = await cache.get_prefixed_json(self._timeline_suffix(monitor_id_s)) or {}
             except Exception:
                 continue
-            if not isinstance(base_payload, dict):
+            rec = self._deserialize_redis_record(
+                monitor_id_s,
+                base_payload,
+                daily_payload,
+                timeline_payload,
+            )
+            if rec is None:
                 continue
-
-            monitor_kind = str(base_payload.get("monitor_kind") or "")
-            if monitor_kind not in {"uptime", "server", "heartbeat"}:
-                continue
-
-            rec = dict(base_payload)
-            rec["id"] = monitor_id_s
-            rec["created_at"] = _as_dt(rec.get("created_at"))
-            rec["status_since"] = _as_dt(rec.get("status_since"))
-            rec["first_data_at"] = _as_dt(rec.get("first_data_at"))
-            rec["last_check_at"] = _as_dt(rec.get("last_check_at"))
-            rec["last_up_at"] = _as_dt(rec.get("last_up_at"))
-            rec["last_ping_at"] = _as_dt(rec.get("last_ping_at"))
-            rec["last_report_at"] = _as_dt(rec.get("last_report_at"))
-            rec["last_checkin_at"] = _as_dt(rec.get("last_checkin_at"))
-
-            rec["codes"] = _ensure_len(list((daily_payload or {}).get("codes") or []), self.day_slots, _STATUS_CODE_NOT_CREATED)
-            rec["up_minutes"] = _ensure_len(list((daily_payload or {}).get("up_minutes") or []), self.day_slots, 0)
-            rec["down_minutes"] = _ensure_len(list((daily_payload or {}).get("down_minutes") or []), self.day_slots, 0)
-            rec["maintenance_minutes"] = _ensure_len(list((daily_payload or {}).get("maintenance_minutes") or []), self.day_slots, 0)
-            rec["today_segments"] = list((timeline_payload or {}).get("segments") or [])
-            for seg in rec["today_segments"]:
-                if isinstance(seg, dict):
-                    seg["start_at"] = _as_dt(seg.get("start_at"))
-                    seg["end_at"] = _as_dt(seg.get("end_at"))
-
-            rec["total_up"] = int(rec.get("total_up") or 0)
-            rec["total_down"] = int(rec.get("total_down") or 0)
-            rec["total_maintenance"] = int(rec.get("total_maintenance") or 0)
-            rec["rt_sum_up"] = float(rec.get("rt_sum_up") or 0.0)
-            rec["rt_count_up"] = int(rec.get("rt_count_up") or 0)
-            rec["metrics"] = rec.get("metrics") or {}
-
             records[monitor_id_s] = rec
-            self._monitor_kind[monitor_id_s] = monitor_kind
+            self._monitor_kind[monitor_id_s] = str(rec.get("monitor_kind") or "")
 
         if not records:
             return None
@@ -1053,8 +1151,7 @@ class StatusSummaryService:
         for row in server_rows:
             rec = self._new_record_from_server_row(dict(row), day_list)
             monitor_id_s = str(rec["id"])
-            has_data = rec.get("last_checkin_at") is not None
-            rec["first_data_at"] = rec.get("created_at") if has_data else None
+            self._backfill_first_data_at(rec)
             rec["metrics"] = metrics_map.get(monitor_id_s, {})
             self._apply_counts_to_record(rec, day_counts_map.get(monitor_id_s, {}), day_index)
             total_counts = totals_map.get(monitor_id_s, {})
@@ -1068,8 +1165,7 @@ class StatusSummaryService:
         for row in heartbeat_rows:
             rec = self._new_record_from_heartbeat_row(dict(row), day_list)
             monitor_id_s = str(rec["id"])
-            has_data = rec.get("last_checkin_at") is not None
-            rec["first_data_at"] = rec.get("created_at") if has_data else None
+            self._backfill_first_data_at(rec)
             self._apply_counts_to_record(rec, day_counts_map.get(monitor_id_s, {}), day_index)
             total_counts = totals_map.get(monitor_id_s, {})
             rec["total_up"] = int(total_counts.get("up") or 0)
@@ -1193,6 +1289,28 @@ class StatusSummaryService:
             rec["heartbeat_type"] = "server_agent"
         elif monitor_kind == "heartbeat":
             rec["heartbeat_type"] = monitor.get("heartbeat_type") or rec.get("heartbeat_type") or "cronjob"
+        self._backfill_first_data_at(rec)
+
+    def _backfill_first_data_at(self, rec: dict[str, Any]) -> bool:
+        if _as_dt(rec.get("first_data_at")) is not None:
+            return False
+
+        kind = str(rec.get("monitor_kind") or "").strip().lower()
+        if kind == "server":
+            activity_at = _as_dt(rec.get("last_checkin_at")) or _as_dt(rec.get("last_report_at"))
+        elif kind == "heartbeat":
+            activity_at = _as_dt(rec.get("last_checkin_at")) or _as_dt(rec.get("last_ping_at"))
+        else:
+            return False
+
+        if activity_at is None:
+            return False
+
+        rec["first_data_at"] = _as_dt(rec.get("created_at")) or activity_at
+        monitor_id_s = str(rec.get("id") or "").strip()
+        if monitor_id_s:
+            self._dirty_monitor_ids.add(monitor_id_s)
+        return True
 
     def _apply_counts_to_record(
         self,
@@ -1292,6 +1410,9 @@ class StatusSummaryService:
         return round((up / total) * 100, 4)
 
     def _record_to_public_monitor(self, rec: dict[str, Any]) -> dict[str, Any]:
+        if self._backfill_first_data_at(rec):
+            self._recompute_all_codes(rec)
+
         kind = rec.get("monitor_kind")
         status_value = str(rec.get("status") or "unknown")
         uptime_pct = self._calc_uptime_percentage(rec)

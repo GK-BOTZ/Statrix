@@ -66,7 +66,6 @@ async def logout(current_user: dict = Depends(get_current_user)):
     jti = current_user.get("_jti")
     exp = current_user.get("_exp")
     if jti and exp:
-        # exp is a Unix timestamp from the JWT
         try:
             expires_at = datetime.fromtimestamp(float(exp), tz=timezone.utc).replace(tzinfo=None)
         except (ValueError, TypeError, OSError):

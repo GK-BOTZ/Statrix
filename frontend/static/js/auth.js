@@ -106,14 +106,6 @@ async function handleLogout() {
     window.location.href = '/edit';
 }
 
-function checkAuth() {
-    if (!isAuthenticated()) {
-        window.location.href = '/edit';
-        return false;
-    }
-    return true;
-}
-
 document.addEventListener('DOMContentLoaded', () => {
     const loginForm = document.getElementById('login-form');
     if (loginForm) {

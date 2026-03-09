@@ -360,6 +360,17 @@
             loadStatus().finally(() => { _navLoading = false; });
         }
 
+        function getStatusBaseUtcDate(offsetDays = historyOffset) {
+            const now = new Date();
+            const baseUtc = new Date(Date.UTC(
+                now.getUTCFullYear(),
+                now.getUTCMonth(),
+                now.getUTCDate()
+            ));
+            baseUtc.setUTCDate(baseUtc.getUTCDate() + Number(offsetDays || 0));
+            return baseUtc;
+        }
+
         function toggleCategory(categoryName) {
             const categoryId = categoryName.replace(/[^a-zA-Z0-9]/g, '_');
 
@@ -382,15 +393,13 @@
 
         function getDateHeaders() {
             const headers = [];
-            const now = new Date();
-            const todayLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-            todayLocal.setDate(todayLocal.getDate() + historyOffset);
+            const baseUtcDate = getStatusBaseUtcDate();
 
             for (let i = 6; i >= 0; i--) {
-                const date = new Date(todayLocal);
-                date.setDate(date.getDate() - i);
+                const date = new Date(baseUtcDate);
+                date.setUTCDate(date.getUTCDate() - i);
                 const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-                headers.push(`${monthNames[date.getMonth()]} ${date.getDate()}`);
+                headers.push(`${monthNames[date.getUTCMonth()]} ${date.getUTCDate()}`);
             }
             return headers;
         }
@@ -624,15 +633,15 @@
                     dotIcon = 'arrow-up';
                     tooltip = customTooltip || `${dayLabel}: Maintenance`;
                 } else if (dayStatus === 'not_created') {
-                    dotClass = 'unknown';
-                    dotIcon = 'times';
+                    dotClass = 'not-created';
+                    dotIcon = 'xmark';
                     tooltip = `${dayLabel}: Not monitored yet`;
                 } else if (dayStatus === 'no_data') {
-                    dotClass = 'unknown';
-                    dotIcon = 'times';
+                    dotClass = 'no-data';
+                    dotIcon = 'xmark';
                     tooltip = `${dayLabel}: No data received`;
                 } else {
-                    historyHtml += `<div class="status-dot unknown"></div>`;
+                    historyHtml += `<div class="status-dot unknown"><i class="fas fa-question"></i></div>`;
                     continue;
                 }
                 if (customTooltip) {
@@ -733,15 +742,15 @@
                     tooltip = customTooltip || `${dayLabel}: Maintenance`;
                 } else if (dayStatus === 'not_created') {
                     dotClass = 'not-created';
-                    dotIcon = 'times';
+                    dotIcon = 'xmark';
                     tooltip = `${dayLabel}: Not monitored yet`;
                 } else if (dayStatus === 'no_data') {
                     dotClass = 'no-data';
-                    dotIcon = 'times';
+                    dotIcon = 'xmark';
                     tooltip = `${dayLabel}: No data received`;
                 } else {
                     dotClass = 'unknown';
-                    dotIcon = 'times';
+                    dotIcon = 'question';
                     tooltip = `${dayLabel}: Unknown`;
                 }
 
@@ -806,7 +815,6 @@
                 if (historyOffset !== 0) {
                     params.set('offset', historyOffset);
                 }
-                params.set('tz_offset_minutes', String(-new Date().getTimezoneOffset()));
 
                 const url = '/api/public/status' + (params.toString() ? '?' + params.toString() : '');
                 const controller = new AbortController();

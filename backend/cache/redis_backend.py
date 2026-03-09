@@ -11,18 +11,6 @@ from ..utils.time import utcnow
 from .base import CacheBackend, SnapshotLoader, coerce_series_score
 from .serializer import dumps, loads
 
-
-ENTITY_KINDS = ("users", "uptime", "server", "heartbeat", "incidents")
-INDEX_KINDS = ("user_email", "server_sid", "heartbeat_sid")
-SERIES_KINDS = (
-    "uptime_checks",
-    "server_history",
-    "heartbeat_pings",
-    "monitor_minutes",
-    "maintenance_events",
-)
-
-
 class RedisCacheBackend(CacheBackend):
     backend_name = "redis"
 
@@ -385,6 +373,7 @@ class RedisCacheBackend(CacheBackend):
         series_kind: str,
         monitor_id: str,
         max_score: float,
+        min_score: float | None = None,
         monitor_type: str | None = None,
     ) -> int:
         if self.client is None:
@@ -392,11 +381,12 @@ class RedisCacheBackend(CacheBackend):
         monitor_id_s = str(monitor_id)
         zkey = self._series_zkey(series_kind, monitor_id_s, monitor_type=monitor_type)
         obj_key = self._series_obj_key(series_kind, monitor_id_s)
-        ids = await self.client.zrangebyscore(zkey, min="-inf", max=max_score)
+        min_bound: str | float = "-inf" if min_score is None else float(min_score)
+        ids = await self.client.zrangebyscore(zkey, min=min_bound, max=max_score)
         if not ids:
             return 0
         pipe = self.client.pipeline(transaction=False)
-        pipe.zremrangebyscore(zkey, min="-inf", max=max_score)
+        pipe.zremrangebyscore(zkey, min=min_bound, max=max_score)
         for member_id in ids:
             pipe.hdel(obj_key, member_id)
         await pipe.execute()
@@ -424,6 +414,53 @@ class RedisCacheBackend(CacheBackend):
     async def rebuild_from_db(self, loader_fn: SnapshotLoader) -> None:
         snapshot = await loader_fn()
         await self.warmup_from_snapshot(snapshot)
+
+    async def _purge_pattern(self, pattern: str) -> int:
+        if self.client is None:
+            return 0
+
+        deleted = 0
+
+        async def _unlink_batch(keys: list[str]) -> None:
+            nonlocal deleted
+            if not keys:
+                return
+            try:
+                deleted += int(await self.client.unlink(*keys))
+            except Exception:
+                deleted += int(await self.client.delete(*keys))
+
+        cursor = 0
+        pending: list[str] = []
+        while True:
+            cursor, keys = await self.client.scan(cursor=cursor, match=pattern, count=200)
+            pending.extend(str(key) for key in keys)
+            while len(pending) >= 100:
+                await _unlink_batch(pending[:100])
+                pending = pending[100:]
+            if cursor == 0:
+                break
+
+        if pending:
+            await _unlink_batch(pending)
+
+        return deleted
+
+    async def purge_series_kind(self, series_kind: str) -> int:
+        if self.client is None:
+            return 0
+
+        series_value = str(series_kind or "").strip().lower()
+        z_pattern = self._k(f"z:{series_value}:*")
+        deleted = await self._purge_pattern(z_pattern)
+
+        if series_value == "monitor_minutes":
+            obj_pattern = self._k(f"obj:{series_value}:*")
+            deleted += await self._purge_pattern(obj_pattern)
+        else:
+            deleted += await self._purge_pattern(self._k(f"obj:{series_value}"))
+
+        return deleted
 
     async def stats(self) -> dict[str, Any]:
         if self.client is None:

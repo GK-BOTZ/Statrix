@@ -10,9 +10,9 @@ from datetime import datetime, timedelta
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from ..cache import CacheUnavailableError
 from ..config import settings
 from ..database import GRACE_PERIOD_MINUTES, db
-from ..status_summary import status_summary_service
 from ..utils.cache import invalidate_status_cache
 from ..utils.email import send_down_alert, send_up_alert
 from ..utils.time import utcnow
@@ -23,10 +23,29 @@ _scheduler: AsyncIOScheduler | None = None
 _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}"
 
 _alerted_monitors: set[str] = set()
+_active_compression_jobs: set[str] = set()
+_compression_job_lock = asyncio.Lock()
+
+_COMPRESSION_JOB_SPACING_SECONDS = 120
+_COMPRESSION_STARTUP_DELAY_SECONDS = 300
+_COMPRESSION_DISPATCH_LOCK_TTL_SECONDS = 3600
+_COMPRESSION_RECONCILE_GRACE_SECONDS = 180
+_COMPRESSION_RECONCILE_JOB_ID = "compression_reconcile"
+_COMPRESSION_STARTUP_JOB_ID = "compression_startup_recovery"
 
 
 def _floor_to_minute(dt: datetime) -> datetime:
     return dt.replace(second=0, microsecond=0)
+
+
+def _single_worker_lock_fallback_allowed() -> bool:
+    raw = (os.getenv("WEB_CONCURRENCY") or "").strip()
+    if not raw:
+        return True
+    try:
+        return int(raw) <= 1
+    except ValueError:
+        return True
 
 
 def _monitor_key(monitor_id) -> str:
@@ -91,20 +110,32 @@ async def _probe_all_uptime_monitors(monitors: list) -> dict[str, bool]:
 
 
 async def _run_monitor_sweep() -> None:
-    global _alerted_monitors
     lock_acquired = False
     try:
         if settings.MONITOR_LEADER_LOCK_ENABLED and db.cache_service:
-            lock_acquired = await db.cache_service.try_acquire_leader_lock(
-                lock_name="monitor_sweep",
-                owner=_INSTANCE_ID,
-                ttl_seconds=settings.MONITOR_LEADER_LOCK_TTL_SECONDS,
-            )
-            if not lock_acquired:
+            try:
+                lock_acquired = await db.cache_service.try_acquire_leader_lock(
+                    lock_name="monitor_sweep",
+                    owner=_INSTANCE_ID,
+                    ttl_seconds=settings.MONITOR_LEADER_LOCK_TTL_SECONDS,
+                )
+            except CacheUnavailableError:
+                if _single_worker_lock_fallback_allowed():
+                    logger.warning(
+                        "Proceeding without Redis leader lock for monitor sweep (single-worker fallback)"
+                    )
+                else:
+                    logger.warning("Skipped monitor sweep: Redis leader lock unavailable")
+                    return
+            if not lock_acquired and not _single_worker_lock_fallback_allowed():
                 logger.debug("Skipped monitor sweep on non-leader worker")
                 return
 
-        await db.ensure_cache_available()
+        try:
+            await db.ensure_cache_available()
+        except CacheUnavailableError:
+            logger.debug("Monitor sweep skipped: cache unavailable", exc_info=True)
+            return
 
         now = utcnow()
         now_minute = _floor_to_minute(now)
@@ -270,6 +301,21 @@ async def _run_monitor_sweep() -> None:
         if minute_records:
             await db.write_monitor_minutes_batch(minute_records)
 
+            if db.cache_service:
+                today = now_minute.date()
+                pipe = db.cache_service.backend.client.pipeline() if hasattr(db.cache_service.backend, 'client') else None
+                for monitor_id, minute, status in minute_records:
+                    monitor_id_str = str(monitor_id)
+                    if pipe:
+                        key = db.cache_service._k(f"daily:{monitor_id_str}:{today.isoformat()}")
+                        pipe.hincrby(key, status, 1)
+                        pipe.expire(key, 86400 * db.cache_service.daily_stats_ttl_days)
+                    else:
+                        await db.cache_service.increment_daily_stat(monitor_id_str, today, status)
+
+                if pipe:
+                    await pipe.execute()
+
         invalidate_status_cache()
 
     except Exception:
@@ -285,38 +331,179 @@ async def _run_monitor_sweep() -> None:
                 logger.exception("Failed releasing monitor sweep leader lock")
 
 
-async def _rebuild_cache_if_unhealthy() -> None:
-    if not db.cache_service:
-        return
-    if db.cache_warming_up:
-        return
-    if db.cache_service.healthy:
-        return
+def _compression_job_pending(job_id: str) -> bool:
+    return job_id in _active_compression_jobs or (
+        _scheduler is not None and _scheduler.get_job(job_id) is not None
+    )
+
+
+async def _run_monitor_compression_job(
+    monitor_kind: str,
+    monitor_id: str,
+    window_start_iso: str,
+    window_end_iso: str,
+) -> None:
+    job_id = db.make_compression_job_id(
+        monitor_kind,
+        monitor_id,
+        datetime.fromisoformat(window_start_iso),
+        datetime.fromisoformat(window_end_iso),
+    )
+    _active_compression_jobs.add(job_id)
     try:
-        if await db.cache_service.backend.ping():
-            await db.cache_service.mark_healthy()
-            logger.info("Cache recovered via ping; skipping rebuild")
-            return
+        async with _compression_job_lock:
+            window_start = datetime.fromisoformat(window_start_iso)
+            window_end = datetime.fromisoformat(window_end_iso)
+            logger.info(
+                "Compression job started kind=%s monitor=%s window=%s..%s",
+                monitor_kind,
+                monitor_id,
+                window_start_iso,
+                window_end_iso,
+            )
+            results = await db.compress_monitor_window(
+                monitor_kind,
+                monitor_id,
+                window_start,
+                window_end,
+            )
+            logger.info(
+                "Compression job finished kind=%s monitor=%s window=%s..%s results=%s",
+                monitor_kind,
+                monitor_id,
+                window_start_iso,
+                window_end_iso,
+                results,
+            )
     except Exception:
-        logger.debug("Cache pre-rebuild ping check failed", exc_info=True)
+        logger.exception(
+            "Compression job failed kind=%s monitor=%s window=%s..%s",
+            monitor_kind,
+            monitor_id,
+            window_start_iso,
+            window_end_iso,
+        )
+    finally:
+        _active_compression_jobs.discard(job_id)
+
+
+async def _dispatch_data_compression(
+    reason: str = "daily",
+    schedule_reconcile: bool = True,
+) -> int:
+    if _scheduler is None:
+        return 0
+
+    lock_acquired = False
     try:
-        logger.warning("Cache unhealthy; attempting rebuild from DB snapshot")
-        await db.resync_cache_from_db()
-        if settings.STATUS_SUMMARY_ENABLED:
-            await status_summary_service.rebuild_from_redis(db)
-        await db.cache_service.mark_healthy()
-        logger.info("Cache rebuild succeeded")
+        if settings.MONITOR_LEADER_LOCK_ENABLED and db.cache_service:
+            try:
+                lock_acquired = await db.cache_service.try_acquire_leader_lock(
+                    lock_name="data_compression_dispatch",
+                    owner=_INSTANCE_ID,
+                    ttl_seconds=_COMPRESSION_DISPATCH_LOCK_TTL_SECONDS,
+                )
+            except CacheUnavailableError:
+                if _single_worker_lock_fallback_allowed():
+                    logger.warning(
+                        "Proceeding without Redis leader lock for compression dispatch (single-worker fallback)"
+                    )
+                else:
+                    logger.warning("Skipped data compression dispatch: Redis leader lock unavailable")
+                    return 0
+            if not lock_acquired and not _single_worker_lock_fallback_allowed():
+                logger.debug("Skipped data compression dispatch on non-leader worker")
+                return 0
+
+        cutoff = utcnow() - timedelta(days=settings.DATA_RETENTION_DAYS)
+        jobs = await db.discover_overdue_compression_jobs(cutoff)
+        if not jobs:
+            logger.info("Data compression dispatch found no overdue jobs (reason=%s)", reason)
+            return 0
+
+        base_run_at = utcnow()
+        scheduled_count = 0
+        last_run_at: datetime | None = None
+        for job in jobs:
+            if _compression_job_pending(job.job_id):
+                continue
+
+            run_at = base_run_at + timedelta(
+                seconds=scheduled_count * _COMPRESSION_JOB_SPACING_SECONDS
+            )
+            _scheduler.add_job(
+                _run_monitor_compression_job,
+                "date",
+                run_date=run_at,
+                id=job.job_id,
+                kwargs={
+                    "monitor_kind": job.monitor_kind,
+                    "monitor_id": str(job.monitor_id),
+                    "window_start_iso": job.window_start.isoformat(),
+                    "window_end_iso": job.window_end.isoformat(),
+                },
+                max_instances=1,
+                misfire_grace_time=max(300, _COMPRESSION_JOB_SPACING_SECONDS * 2),
+            )
+            scheduled_count += 1
+            last_run_at = run_at
+
+        if schedule_reconcile and last_run_at is not None:
+            _scheduler.add_job(
+                _dispatch_data_compression,
+                "date",
+                run_date=last_run_at + timedelta(seconds=_COMPRESSION_RECONCILE_GRACE_SECONDS),
+                id=_COMPRESSION_RECONCILE_JOB_ID,
+                kwargs={"reason": "reconcile", "schedule_reconcile": False},
+                replace_existing=True,
+                max_instances=1,
+                misfire_grace_time=max(300, _COMPRESSION_RECONCILE_GRACE_SECONDS),
+            )
+
+        logger.info(
+            "Data compression dispatch scheduled %s jobs (reason=%s cutoff=%s)",
+            scheduled_count,
+            reason,
+            cutoff.isoformat(),
+        )
+        return scheduled_count
+    except CacheUnavailableError:
+        logger.warning("Data compression dispatch skipped: cache unavailable (reason=%s)", reason)
+        return 0
     except Exception:
-        logger.exception("Cache rebuild attempt failed")
+        logger.exception("Data compression dispatch failed (reason=%s)", reason)
+        return 0
+    finally:
+        if lock_acquired and settings.MONITOR_LEADER_LOCK_ENABLED and db.cache_service:
+            try:
+                await db.cache_service.release_leader_lock(
+                    lock_name="data_compression_dispatch",
+                    owner=_INSTANCE_ID,
+                )
+            except Exception:
+                logger.exception("Failed releasing data compression dispatch leader lock")
 
 
 async def _run_data_compression() -> None:
-    try:
-        logger.info("Starting daily data compression")
-        results = await db.compress_old_data()
-        logger.info("Data compression finished: %s", results)
-    except Exception:
-        logger.exception("Data compression failed")
+    await _dispatch_data_compression(reason="daily", schedule_reconcile=True)
+
+
+def schedule_startup_compression_dispatch(delay_seconds: int = _COMPRESSION_STARTUP_DELAY_SECONDS) -> None:
+    if _scheduler is None:
+        return
+
+    delay = max(1, int(delay_seconds or _COMPRESSION_STARTUP_DELAY_SECONDS))
+    _scheduler.add_job(
+        _dispatch_data_compression,
+        "date",
+        run_date=utcnow() + timedelta(seconds=delay),
+        id=_COMPRESSION_STARTUP_JOB_ID,
+        kwargs={"reason": "startup_recovery", "schedule_reconcile": True},
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=max(300, delay),
+    )
+    logger.info("Startup data compression recovery scheduled (+%ss)", delay)
 
 
 def start_monitor_loop() -> None:
@@ -332,14 +519,6 @@ def start_monitor_loop() -> None:
         max_instances=1,
         coalesce=True,
         next_run_time=utcnow(),  # run immediately on start
-    )
-    _scheduler.add_job(
-        _rebuild_cache_if_unhealthy,
-        "interval",
-        seconds=max(5, int(settings.CACHE_REBUILD_INTERVAL_SECONDS or 30)),
-        id="cache_rebuild",
-        max_instances=1,
-        coalesce=True,
     )
     _scheduler.add_job(
         _run_data_compression,
@@ -364,7 +543,6 @@ def stop_monitor_loop() -> None:
 async def handle_checkin(
     monitor_id, cache_kind: str, db_type: str, display_type: str, name: str, target: str
 ) -> None:
-    global _alerted_monitors
     now = utcnow()
     now_minute = _floor_to_minute(now)
     key = _monitor_key(monitor_id)

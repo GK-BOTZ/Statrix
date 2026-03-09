@@ -3,7 +3,7 @@
 
 # Statrix
 
-**Self-hosted uptime monitoring, server telemetry & incident management.**
+**Self-hosted uptime monitoring, server telemetry & incident management system.**
 
 [![Python 3.13+](https://img.shields.io/badge/Python-3.13%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -251,7 +251,6 @@ Use [`.env.example`](.env.example) as your baseline. All variables are aligned w
 | Variable | Required | Default | Description |
 |----------|:--------:|---------|-------------|
 | `DATABASE_URL` | ✅ | — | PostgreSQL connection string (`postgresql://...`) |
-| `ENCRYPTION_KEY` | ✅ | — | Encryption key for sensitive data at rest |
 | `JWT_SECRET_KEY` | ✅ | — | Secret key for JWT token signing |
 | `OWNER_EMAIL` | ✅ | — | Admin account email (created on first startup) |
 | `OWNER_PASSWORD` | ✅ | — | Admin account password (created on first startup) |
@@ -261,9 +260,6 @@ Use [`.env.example`](.env.example) as your baseline. All variables are aligned w
 <summary>🔑 <b>Generate secrets from the command line</b></summary>
 
 ```bash
-# Generate Fernet encryption key
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-
 # Generate JWT secret key
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
@@ -304,11 +300,8 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 | `CACHE_WARMUP_FULL` | ❌ | `true` | Preload cache from DB at startup |
 | `CACHE_KEY_PREFIX` | ❌ | `statrix:v1` | Redis key namespace |
 | `CACHE_WARMUP_BATCH_SIZE` | ❌ | `500` | Warmup pipeline batch size |
-| `CACHE_REBUILD_INTERVAL_SECONDS` | ❌ | `30` | Auto-resync interval on cache failure |
 | `MONITOR_LEADER_LOCK_ENABLED` | ❌ | `true` | Prevent duplicate sweeps in multi-worker setups |
 | `MONITOR_LEADER_LOCK_TTL_SECONDS` | ❌ | `90` | Redis leader lock TTL |
-| `CHECK_INTERVAL_SECONDS` | ❌ | `60` | Monitor check loop interval |
-| `NOTIFICATION_CHECK_INTERVAL_SECONDS` | ❌ | `30` | Notification check loop interval |
 | `LOG_LEVEL` | ❌ | `INFO` | Application log level |
 | `UVICORN_ACCESS_LOG` | ❌ | `false` | Enable uvicorn HTTP access logging |
 | `PG_POOL_MIN_SIZE` | ❌ | `2` | PostgreSQL connection pool minimum |
@@ -477,7 +470,7 @@ The dashboard command includes your exact `SID`, endpoint URL, and selected moni
 - [ ] `GET /health` returns `healthy`
 - [ ] Admin login works at `/edit`
 - [ ] Create a test website monitor and force a failure
-- [ ] Confirm downtime email arrives after `OFFLINE_NOTIFICATION_MINUTES`
+- [ ] Confirm downtime email arrives for a real monitor outage
 - [ ] Recover the target and verify recovery email
 - [ ] Confirm status page reflects state changes at `/`
 
@@ -488,7 +481,7 @@ The dashboard command includes your exact `SID`, endpoint URL, and selected moni
 <details>
 <summary>💥 <b>App fails at startup</b></summary>
 
-- Verify `DATABASE_URL`, `ENCRYPTION_KEY`, and `JWT_SECRET_KEY` are set correctly.
+- Verify `DATABASE_URL` and `JWT_SECRET_KEY` are set correctly.
 - Confirm the database is reachable from the runtime environment.
 - Check logs for connection errors.
 

@@ -18,8 +18,13 @@ from .database import db
 from .cache import CacheUnavailableError
 from .auth import get_password_hash
 from .dependencies import get_current_admin
-from .background.monitor_loop import start_monitor_loop, stop_monitor_loop
+from .background.monitor_loop import (
+    schedule_startup_compression_dispatch,
+    start_monitor_loop,
+    stop_monitor_loop,
+)
 from .status_summary import status_summary_service
+from .daily_stats import daily_stats_service
 
 _LOG_LEVEL_NAME = str(getattr(settings, "LOG_LEVEL", "INFO") or "INFO").upper()
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
@@ -70,7 +75,7 @@ async def _background_cache_warmup() -> None:
                     await asyncio.sleep(_WARMUP_RETRY_DELAY_SECONDS)
 
         logger.error(
-            "Background cache warmup exhausted %d retries; relying on periodic rebuild job",
+            "Background cache warmup exhausted %d retries; relying on event-driven rebuild",
             _WARMUP_MAX_RETRIES,
         )
     finally:
@@ -94,6 +99,7 @@ async def lifespan(app: FastAPI):
     if db.cache_service:
         try:
             await db.cache_service.connect()
+            await db.cache_service.purge_disabled_series()
             logger.info("Cache backend connected: %s", db.cache_backend_name)
         except Exception as exc:
             logger.exception("Failed to connect cache backend; aborting startup")
@@ -153,6 +159,10 @@ async def lifespan(app: FastAPI):
     if settings.STATUS_SUMMARY_ENABLED:
         try:
             await status_summary_service.start(db)
+            status_summary_service.trigger_rebuild_from_cache(
+                db,
+                reason="startup_cache",
+            )
             status_summary_service.schedule_delayed_warmup(
                 db,
                 delay_seconds=settings.STATUS_SUMMARY_WARMUP_DELAY_SECONDS,
@@ -165,7 +175,18 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to initialize status summary service")
 
+    try:
+        await daily_stats_service.start(db, db.cache_service)
+        logger.info(
+            "Daily stats service enabled (delay=%ss, lookback=%s days)",
+            settings.DAILY_STATS_WARMUP_DELAY_SECONDS,
+            settings.DAILY_STATS_WARMUP_LOOKBACK_DAYS,
+        )
+    except Exception:
+        logger.exception("Failed to initialize daily stats service")
+
     start_monitor_loop()
+    schedule_startup_compression_dispatch()
     logger.info("Monitor loop started")
     logger.info("Statrix has started")
 
@@ -184,6 +205,10 @@ async def lifespan(app: FastAPI):
         await status_summary_service.stop()
     except Exception:
         logger.exception("Failed to stop status summary service cleanly")
+    try:
+        await daily_stats_service.stop()
+    except Exception:
+        logger.exception("Failed to stop daily stats service cleanly")
     await db.close()
     logger.info("Database connection closed")
 

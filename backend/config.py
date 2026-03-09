@@ -4,16 +4,19 @@
 import json
 import logging
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     DATABASE_URL: str
-
-    ENCRYPTION_KEY: str
 
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
@@ -32,8 +35,6 @@ class Settings(BaseSettings):
     SMTP_FROM: str = ""
     NOTIFICATION_EMAIL: str = ""
 
-    OFFLINE_NOTIFICATION_MINUTES: int = 3
-
     APP_NAME: str = "Statrix"
     APP_URL: str = "http://localhost:8000"
     COMPANY_NAME: str = "Statrix"
@@ -43,16 +44,13 @@ class Settings(BaseSettings):
     STATUS_LOGO: str = ""
     STATUS_PAGE_TITLE: str = "Statrix Status"
 
-    CHECK_INTERVAL_SECONDS: int = 60
-    NOTIFICATION_CHECK_INTERVAL_SECONDS: int = 30
-
     CACHE_BACKEND: str = "redis"
     REDIS_URL: str = ""
     CACHE_FAIL_FAST: bool = True
     CACHE_WARMUP_FULL: bool = True
     CACHE_KEY_PREFIX: str = "statrix:v1"
     CACHE_WARMUP_BATCH_SIZE: int = 500
-    CACHE_REBUILD_INTERVAL_SECONDS: int = 30
+    CACHE_DISABLED_SERIES: str = "server_history,heartbeat_pings,uptime_checks"
     MONITOR_LEADER_LOCK_ENABLED: bool = True
     MONITOR_LEADER_LOCK_TTL_SECONDS: int = 90
 
@@ -72,6 +70,10 @@ class Settings(BaseSettings):
     STATUS_SUMMARY_MAX_TIMELINE_SEGMENTS: int = 32
     STATUS_SUMMARY_PARTIAL_DOWNTIME_MINUTES: float = 15.0
     STATUS_SUMMARY_REDIS_PREFIX: str = "status:summary:v1"
+    DAILY_STATS_WARMUP_ENABLED: bool = True
+    DAILY_STATS_WARMUP_DELAY_SECONDS: int = 70
+    DAILY_STATS_WARMUP_LOOKBACK_DAYS: int = 400
+    DAILY_STATS_CACHE_TTL_DAYS: int = 400
 
     def get_cors_origins(self) -> list[str]:
         """Parse CORS_ORIGINS string into a list.  Raises on invalid JSON."""
@@ -82,11 +84,6 @@ class Settings(BaseSettings):
             return origins
         except (json.JSONDecodeError, ValueError) as exc:
             raise RuntimeError(f"Invalid CORS_ORIGINS configuration: {exc}") from exc
-
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-
 
 settings = Settings()
 

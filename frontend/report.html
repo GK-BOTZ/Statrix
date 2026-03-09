@@ -990,12 +990,12 @@
                     icon = 'arrow-up';
                     tooltip = `${dayLabel}: Maintenance`;
                 } else if (status === 'not_created') {
-                    statusClass = 'unknown';
-                    icon = 'times';
+                    statusClass = 'not-created';
+                    icon = 'xmark';
                     tooltip = `${dayLabel}: Not monitored yet`;
                 } else if (status === 'no_data') {
-                    statusClass = 'unknown';
-                    icon = 'times';
+                    statusClass = 'no-data';
+                    icon = 'xmark';
                     tooltip = `${dayLabel}: No data received`;
                 } else if (status === 'unknown') {
                     statusClass = 'unknown';

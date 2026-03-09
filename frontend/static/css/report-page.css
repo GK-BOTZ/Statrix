@@ -954,6 +954,16 @@
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 0 2px rgba(255, 255, 255, 0.05);
 }
 
+.uptime-day .status.not-created {
+    background: linear-gradient(135deg, #344253 0%, #232f3e 100%);
+    box-shadow: 0 2px 8px rgba(7, 11, 17, 0.28), 0 0 0 2px rgba(255, 255, 255, 0.04);
+}
+
+.uptime-day .status.no-data {
+    background: linear-gradient(135deg, #435366 0%, #2f3d4f 100%);
+    box-shadow: 0 2px 8px rgba(11, 16, 24, 0.28), 0 0 0 2px rgba(255, 255, 255, 0.04);
+}
+
 .uptime-day .status i {
     color: #fff;
     font-size: 12px;
