@@ -10,9 +10,13 @@
     <link rel="icon" type="image/png" href="/static/images/favicon.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/logo.png">
     <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/public.css">
+    <link rel="stylesheet" href="/static/css/delight.css">
     <style>
         body {
             overflow-x: hidden;
@@ -141,7 +145,7 @@
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
-            text-shadow: 0 0 30px rgba(68, 182, 174, 0.3);
+            filter: drop-shadow(0 0 20px rgba(68, 182, 174, 0.25));
         }
 
         .subtitle {
@@ -343,7 +347,7 @@
 
         <div class="astronaut-container">
             <div class="astronaut-glow"></div>
-            <img src="/static/images/404.png" alt="404 - Astronaut" class="astronaut-image">
+            <img src="/static/images/404.png" alt="404 - Astronaut" class="astronaut-image" width="300" height="300">
         </div>
 
         <div class="content" id="content">
@@ -370,29 +374,17 @@
     <script>
         function createStars() {
             const starfield = document.getElementById('starfield');
-            const starCount = 100; // Number of stars
+            const fragment = document.createDocumentFragment();
+            const starCount = 100;
 
             for (let i = 0; i < starCount; i++) {
                 const star = document.createElement('div');
                 star.className = 'star';
-
-                const x = Math.random() * 100;
-                const y = Math.random() * 100;
-
                 const size = Math.random() * 3 + 1;
-
-                const delay = Math.random() * 3;
-                const duration = Math.random() * 2 + 2; // 2-4 seconds
-
-                star.style.left = x + '%';
-                star.style.top = y + '%';
-                star.style.width = size + 'px';
-                star.style.height = size + 'px';
-                star.style.animationDelay = delay + 's';
-                star.style.animationDuration = duration + 's';
-
-                starfield.appendChild(star);
+                star.style.cssText = `left:${Math.random() * 100}%;top:${Math.random() * 100}%;width:${size}px;height:${size}px;animation-delay:${Math.random() * 3}s;animation-duration:${Math.random() * 2 + 2}s`;
+                fragment.appendChild(star);
             }
+            starfield.appendChild(fragment);
         }
 
         function set404Message() {
@@ -425,29 +417,23 @@
         createStars();
         set404Message();
 
-        if (window.matchMedia('(min-width: 769px)').matches) {
-            document.addEventListener('mousemove', (e) => {
-                const mouseX = e.clientX / window.innerWidth;
-                const mouseY = e.clientY / window.innerHeight;
-
-                const astronaut = document.querySelector('.astronaut-container');
-                if (astronaut) {
-                    const moveX = (mouseX - 0.5) * 20;
-                    const moveY = (mouseY - 0.5) * 20;
+        const astronaut = document.querySelector('.astronaut-container');
+        if (astronaut) {
+            if (window.matchMedia('(min-width: 769px)').matches) {
+                document.addEventListener('mousemove', (e) => {
+                    const moveX = (e.clientX / window.innerWidth - 0.5) * 20;
+                    const moveY = (e.clientY / window.innerHeight - 0.5) * 20;
                     astronaut.style.transform = `translate(${moveX}px, ${moveY}px)`;
-                }
-            });
-        }
+                }, { passive: true });
+            }
 
-        if (window.DeviceOrientationEvent && window.matchMedia('(max-width: 768px)').matches) {
-            window.addEventListener('deviceorientation', (e) => {
-                const astronaut = document.querySelector('.astronaut-container');
-                if (astronaut && e.beta !== null && e.gamma !== null) {
-                    const tiltX = (e.gamma || 0) / 5; // -90 to 90 degrees
-                    const tiltY = (e.beta || 0) / 5;  // -180 to 180 degrees
-                    astronaut.style.transform = `translate(${tiltX}px, ${tiltY}px)`;
-                }
-            });
+            if (window.DeviceOrientationEvent && window.matchMedia('(max-width: 768px)').matches) {
+                window.addEventListener('deviceorientation', (e) => {
+                    if (e.beta !== null && e.gamma !== null) {
+                        astronaut.style.transform = `translate(${(e.gamma || 0) / 5}px, ${(e.beta || 0) / 5}px)`;
+                    }
+                }, { passive: true });
+            }
         }
     </script>
 </body>

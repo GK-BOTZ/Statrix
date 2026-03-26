@@ -1,10 +1,6 @@
 /* This file is a part of Statrix */
 /* Coding : Priyanshu Dey [@HellFireDevil18] */
 
-.hidden {
-    display: none;
-}
-
 .back-link {
     display: flex;
     align-items: center;
@@ -12,13 +8,19 @@
     color: #889097;
     text-decoration: none;
     font-size: 14px;
-    transition: color 0.2s;
+    transition:
+        color var(--motion-fast) var(--ease-out-quart),
+        transform var(--motion-fast) var(--ease-out-quart);
     width: 20px;
     height: 20px;
 }
 
 .back-link:hover {
     color: #fff;
+}
+
+.back-link:active {
+    transform: scale(0.96);
 }
 
 .page-title {
@@ -29,7 +31,7 @@
     flex: 1;
     white-space: nowrap;
     cursor: pointer;
-    transition: color 0.2s;
+    transition: color var(--motion-fast) var(--ease-out-quart);
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
@@ -95,7 +97,12 @@
     font-weight: 600;
     cursor: pointer;
     min-width: 160px;
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        transform var(--motion-fast) var(--ease-out-quart),
+        box-shadow var(--motion-fast) var(--ease-out-quart),
+        background-color var(--motion-fast) var(--ease-out-quart),
+        border-color var(--motion-fast) var(--ease-out-quart),
+        color var(--motion-fast) var(--ease-out-quart);
 }
 
 .history-dropdown select:hover {
@@ -131,7 +138,12 @@
     padding: 7px 10px;
     border-radius: 8px;
     cursor: pointer;
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        transform var(--motion-fast) var(--ease-out-quart),
+        box-shadow var(--motion-fast) var(--ease-out-quart),
+        background-color var(--motion-fast) var(--ease-out-quart),
+        border-color var(--motion-fast) var(--ease-out-quart),
+        color var(--motion-fast) var(--ease-out-quart);
     text-decoration: none;
     display: inline-flex;
     align-items: center;
@@ -144,6 +156,10 @@
     border-color: rgba(68, 182, 174, 0.4);
     box-shadow: 0 0 0 3px rgba(68, 182, 174, 0.1);
     transform: translateY(-1px);
+}
+
+.calendar-btn:active {
+    transform: translateY(0) scale(0.98);
 }
 
 .status-cards {
@@ -164,12 +180,19 @@
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.1);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.1);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        transform var(--motion-medium) var(--ease-out-quint),
+        box-shadow var(--motion-medium) var(--ease-out-quint),
+        border-color var(--motion-medium) var(--ease-out-quint);
 }
 
 .status-card:hover {
     transform: translateY(-2px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.status-card:active {
+    transform: translateY(0) scale(0.98);
 }
 
 .status-card.offline {
@@ -223,15 +246,6 @@
 @media (max-width: 900px) {
     .container {
         padding: 12px;
-    }
-
-    .logo-header {
-        padding: 6px 0 8px;
-    }
-
-    .logo-header img {
-        width: 60px;
-        height: 60px;
     }
 
     .title-header {
@@ -361,15 +375,6 @@
 @media (max-width: 700px) {
     .container {
         padding: 10px;
-    }
-
-    .logo-header {
-        padding: 4px 0 6px;
-    }
-
-    .logo-header img {
-        width: 50px;
-        height: 50px;
     }
 
     .title-header {
@@ -577,16 +582,6 @@
         padding: 8px;
     }
 
-    .logo-header {
-        padding: 3px 0 5px;
-    }
-
-    .logo-header img {
-        width: 44px;
-        height: 44px;
-        border-width: 2px;
-    }
-
     .title-header {
         padding: 5px 7px;
         margin-bottom: 6px;
@@ -782,7 +777,10 @@
     margin-bottom: 16px;
     border: 1px solid rgba(255, 255, 255, 0.08);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        transform var(--motion-medium) var(--ease-out-quint),
+        box-shadow var(--motion-medium) var(--ease-out-quint),
+        border-color var(--motion-medium) var(--ease-out-quint);
 }
 
 .content-box:hover {
@@ -914,7 +912,10 @@
     justify-content: center;
     margin: 0 auto;
     box-shadow: 0 2px 8px rgba(68, 182, 174, 0.3), 0 0 0 2px rgba(68, 182, 174, 0.1);
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        transform var(--motion-fast) var(--ease-out-quart),
+        box-shadow var(--motion-fast) var(--ease-out-quart),
+        background-color var(--motion-fast) var(--ease-out-quart);
 }
 
 .uptime-day .status:hover {
@@ -1015,7 +1016,12 @@
     cursor: pointer;
     font-size: 11px;
     font-weight: 500;
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        transform var(--motion-fast) var(--ease-out-quart),
+        box-shadow var(--motion-fast) var(--ease-out-quart),
+        background-color var(--motion-fast) var(--ease-out-quart),
+        border-color var(--motion-fast) var(--ease-out-quart),
+        color var(--motion-fast) var(--ease-out-quart);
 }
 
 .time-range-btns button:hover {
@@ -1024,6 +1030,10 @@
     border-color: rgba(68, 182, 174, 0.3);
     transform: translateY(-1px);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.time-range-btns button:active:not(:disabled) {
+    transform: translateY(0) scale(0.98);
 }
 
 .time-range-btns button.active {
@@ -1101,7 +1111,11 @@
     border: 1px solid rgba(255,255,255,0.08);
     border-radius: 10px;
     padding: 14px 12px;
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        transform var(--motion-fast) var(--ease-out-quart),
+        box-shadow var(--motion-fast) var(--ease-out-quart),
+        border-color var(--motion-fast) var(--ease-out-quart),
+        background-color var(--motion-fast) var(--ease-out-quart);
 }
 
 .graph-stat:hover {
@@ -1159,11 +1173,6 @@
 .loading i {
     margin-right: 10px;
     animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
 }
 
 .loading-overlay {
@@ -1293,3 +1302,25 @@
         gap: 24px;
     }
 }
+
+@media (prefers-reduced-motion: no-preference) {
+    .title-header {
+        animation: riseIn var(--motion-entrance) var(--ease-out-quint) both;
+    }
+
+    .status-cards {
+        animation: riseIn var(--motion-entrance) var(--ease-out-quint) both;
+        animation-delay: 60ms;
+    }
+
+    .content-box {
+        animation: riseIn var(--motion-entrance) var(--ease-out-quint) both;
+        animation-delay: 120ms;
+    }
+
+    .graph-section {
+        animation: riseIn var(--motion-entrance) var(--ease-out-quint) both;
+        animation-delay: 180ms;
+    }
+}
+

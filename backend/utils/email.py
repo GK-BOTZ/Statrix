@@ -15,61 +15,78 @@ _FAVICON_CID = "statrix-favicon"
 _FAVICON_PATH = Path(__file__).resolve().parents[2] / "frontend" / "static" / "images" / "favicon.png"
 
 
-_FONT = "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubuntu,sans-serif;"
+_FONT = "font-family:'Source Serif 4',Georgia,'Times New Roman',serif;"
 
 _DOWN_TEMPLATE = (
     '<!DOCTYPE html>'
     '<html><head><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width,initial-scale=1.0">'
     '</head>'
-    '<body style="margin:0;padding:0;background:#f4f4f5;{font}">'
+    '<body style="margin:0;padding:0;background:#1e2835;{font}">'
     '<div style="padding:40px 16px;">'
 
     '<table cellpadding="0" cellspacing="0" border="0" align="center"'
-    ' style="max-width:560px;width:100%;margin:0 auto;background:#ffffff;'
-    'border-radius:12px;border:1px solid #e4e4e7;border-collapse:collapse;">'
+    ' style="max-width:560px;width:100%;margin:0 auto;background:#253545;'
+    'border-radius:12px;border:1px solid rgba(255,255,255,0.1);border-collapse:collapse;">'
 
-    '<tr><td style="padding:24px 36px;border-bottom:1px solid #e4e4e7;text-align:center;">'
-    '<img src="{logo_url}" alt="S" width="48" height="48"'
+    # Header
+    '<tr><td style="padding:24px 36px;border-bottom:1px solid rgba(255,255,255,0.08);text-align:center;">'
+    '<img src="{logo_url}" alt="S" width="44" height="44"'
     ' style="display:inline-block;vertical-align:middle;border-radius:50%;'
-    'background:#f0fdfa;border:2px solid #e0f2fe;">'
+    'border:2px solid rgba(255,255,255,0.15);">'
     '<a href="https://github.com/HellFireDevil18/Statrix" target="_blank"'
     ' style="display:inline-block;vertical-align:middle;margin-left:14px;'
     'font-size:22px;font-weight:700;color:#00d4aa;letter-spacing:-0.3px;text-decoration:none;{font}">'
     'Statrix</a>'
     '</td></tr>'
 
-    '<tr><td style="padding:32px 36px;">'
-    '<p style="font-size:15px;color:#18181b;margin:0 0 20px;line-height:1.5;{font}">'
-    'Hello <strong>{owner_name}</strong>,</p>'
-    '<p style="font-size:15px;color:#18181b;margin:0 0 24px;line-height:1.5;{font}">'
-    'One of your monitors is now <strong style="color:#ef4444;">DOWN</strong>.</p>'
+    # Status bar
+    '<tr><td style="padding:0;">'
+    '<div style="background:#ef4444;padding:12px 36px;text-align:center;">'
+    '<span style="font-size:13px;font-weight:700;color:#ffffff;text-transform:uppercase;'
+    'letter-spacing:1px;{font}">&#9660; Monitor Down</span>'
+    '</div>'
+    '</td></tr>'
 
-    '<p style="font-size:15px;color:#18181b;margin:0 0 10px;line-height:1.6;{font}">'
-    '<span style="color:#71717a;">Monitor: </span>'
+    # Body
+    '<tr><td style="padding:28px 36px;">'
+    '<p style="font-size:15px;color:#e2e8f0;margin:0 0 20px;line-height:1.5;{font}">'
+    'Hello <strong>{owner_name}</strong>,</p>'
+    '<p style="font-size:15px;color:#c5d0de;margin:0 0 24px;line-height:1.5;{font}">'
+    'One of your monitors is <strong style="color:#ef4444;">not responding</strong>.</p>'
+
+    '<table cellpadding="0" cellspacing="0" border="0" style="width:100%;'
+    'background:rgba(15,23,42,0.4);border-radius:8px;border:1px solid rgba(255,255,255,0.06);">'
+    '<tr><td style="padding:16px 20px;">'
+
+    '<p style="font-size:14px;color:#c5d0de;margin:0 0 10px;line-height:1.6;{font}">'
+    '<span style="color:#889097;">Monitor </span>'
     '<strong style="color:#00d4aa;">{monitor_name}</strong></p>'
 
-    '<p style="font-size:15px;color:#18181b;margin:0 0 10px;line-height:1.6;{font}">'
-    '<span style="color:#71717a;">Type: </span>'
-    '<strong>{monitor_type}</strong></p>'
+    '<p style="font-size:14px;color:#c5d0de;margin:0 0 10px;line-height:1.6;{font}">'
+    '<span style="color:#889097;">Type </span>'
+    '<strong style="color:#e2e8f0;">{monitor_type}</strong></p>'
 
-    '<p style="font-size:15px;color:#18181b;margin:0 0 10px;line-height:1.6;{font}">'
-    '<span style="color:#71717a;">Target: </span>'
-    '<strong>{target}</strong></p>'
+    '<p style="font-size:14px;color:#c5d0de;margin:0 0 10px;line-height:1.6;{font}">'
+    '<span style="color:#889097;">Target </span>'
+    '<strong style="color:#e2e8f0;">{target}</strong></p>'
 
-    '<p style="font-size:15px;color:#18181b;margin:0 0 10px;line-height:1.6;{font}">'
-    '<span style="color:#71717a;">Noticed at: </span>'
-    '<strong>{down_since}</strong></p>'
+    '<p style="font-size:14px;color:#c5d0de;margin:0;line-height:1.6;{font}">'
+    '<span style="color:#889097;">Noticed at </span>'
+    '<strong style="color:#e2e8f0;">{down_since}</strong></p>'
 
-    '<div style="text-align:center;padding:20px 0 4px;">'
+    '</td></tr></table>'
+
+    '<div style="text-align:center;padding:24px 0 4px;">'
     '<a href="{status_url}" style="display:inline-block;padding:12px 32px;'
     'border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;'
     'color:#ffffff;background:#ef4444;{font}">View Status Page</a>'
     '</div>'
     '</td></tr>'
 
-    '<tr><td style="text-align:center;padding:20px 36px;border-top:1px solid #e4e4e7;">'
-    '<p style="margin:0;font-size:12px;color:#a1a1aa;{font}">'
+    # Footer
+    '<tr><td style="text-align:center;padding:20px 36px;border-top:1px solid rgba(255,255,255,0.06);">'
+    '<p style="margin:0;font-size:12px;color:#889097;{font}">'
     'Powered by <a href="https://github.com/HellFireDevil18/Statrix" target="_blank"'
     ' style="color:#00d4aa;text-decoration:none;font-weight:600;">Statrix</a></p>'
     '</td></tr>'
@@ -83,58 +100,75 @@ _UP_TEMPLATE = (
     '<html><head><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width,initial-scale=1.0">'
     '</head>'
-    '<body style="margin:0;padding:0;background:#f4f4f5;{font}">'
+    '<body style="margin:0;padding:0;background:#1e2835;{font}">'
     '<div style="padding:40px 16px;">'
 
     '<table cellpadding="0" cellspacing="0" border="0" align="center"'
-    ' style="max-width:560px;width:100%;margin:0 auto;background:#ffffff;'
-    'border-radius:12px;border:1px solid #e4e4e7;border-collapse:collapse;">'
+    ' style="max-width:560px;width:100%;margin:0 auto;background:#253545;'
+    'border-radius:12px;border:1px solid rgba(255,255,255,0.1);border-collapse:collapse;">'
 
-    '<tr><td style="padding:24px 36px;border-bottom:1px solid #e4e4e7;text-align:center;">'
-    '<img src="{logo_url}" alt="S" width="48" height="48"'
+    # Header
+    '<tr><td style="padding:24px 36px;border-bottom:1px solid rgba(255,255,255,0.08);text-align:center;">'
+    '<img src="{logo_url}" alt="S" width="44" height="44"'
     ' style="display:inline-block;vertical-align:middle;border-radius:50%;'
-    'background:#f0fdfa;border:2px solid #e0f2fe;">'
+    'border:2px solid rgba(255,255,255,0.15);">'
     '<a href="https://github.com/HellFireDevil18/Statrix" target="_blank"'
     ' style="display:inline-block;vertical-align:middle;margin-left:14px;'
     'font-size:22px;font-weight:700;color:#00d4aa;letter-spacing:-0.3px;text-decoration:none;{font}">'
     'Statrix</a>'
     '</td></tr>'
 
-    '<tr><td style="padding:32px 36px;">'
-    '<p style="font-size:15px;color:#18181b;margin:0 0 20px;line-height:1.5;{font}">'
-    'Hello <strong>{owner_name}</strong>,</p>'
-    '<p style="font-size:15px;color:#18181b;margin:0 0 24px;line-height:1.5;{font}">'
-    'One of your monitors is now <strong style="color:#10b981;">UP</strong>.</p>'
+    # Status bar
+    '<tr><td style="padding:0;">'
+    '<div style="background:#10b981;padding:12px 36px;text-align:center;">'
+    '<span style="font-size:13px;font-weight:700;color:#ffffff;text-transform:uppercase;'
+    'letter-spacing:1px;{font}">&#9650; Monitor Recovered</span>'
+    '</div>'
+    '</td></tr>'
 
-    '<p style="font-size:15px;color:#18181b;margin:0 0 10px;line-height:1.6;{font}">'
-    '<span style="color:#71717a;">Monitor: </span>'
+    # Body
+    '<tr><td style="padding:28px 36px;">'
+    '<p style="font-size:15px;color:#e2e8f0;margin:0 0 20px;line-height:1.5;{font}">'
+    'Hello <strong>{owner_name}</strong>,</p>'
+    '<p style="font-size:15px;color:#c5d0de;margin:0 0 24px;line-height:1.5;{font}">'
+    'One of your monitors is <strong style="color:#10b981;">back online</strong>.</p>'
+
+    '<table cellpadding="0" cellspacing="0" border="0" style="width:100%;'
+    'background:rgba(15,23,42,0.4);border-radius:8px;border:1px solid rgba(255,255,255,0.06);">'
+    '<tr><td style="padding:16px 20px;">'
+
+    '<p style="font-size:14px;color:#c5d0de;margin:0 0 10px;line-height:1.6;{font}">'
+    '<span style="color:#889097;">Monitor </span>'
     '<strong style="color:#00d4aa;">{monitor_name}</strong></p>'
 
-    '<p style="font-size:15px;color:#18181b;margin:0 0 10px;line-height:1.6;{font}">'
-    '<span style="color:#71717a;">Type: </span>'
-    '<strong>{monitor_type}</strong></p>'
+    '<p style="font-size:14px;color:#c5d0de;margin:0 0 10px;line-height:1.6;{font}">'
+    '<span style="color:#889097;">Type </span>'
+    '<strong style="color:#e2e8f0;">{monitor_type}</strong></p>'
 
-    '<p style="font-size:15px;color:#18181b;margin:0 0 10px;line-height:1.6;{font}">'
-    '<span style="color:#71717a;">Target: </span>'
-    '<strong>{target}</strong></p>'
+    '<p style="font-size:14px;color:#c5d0de;margin:0 0 10px;line-height:1.6;{font}">'
+    '<span style="color:#889097;">Target </span>'
+    '<strong style="color:#e2e8f0;">{target}</strong></p>'
 
-    '<p style="font-size:15px;color:#18181b;margin:0 0 10px;line-height:1.6;{font}">'
-    '<span style="color:#71717a;">Downtime: </span>'
-    '<strong>{downtime}</strong></p>'
+    '<p style="font-size:14px;color:#c5d0de;margin:0 0 10px;line-height:1.6;{font}">'
+    '<span style="color:#889097;">Downtime </span>'
+    '<strong style="color:#e2e8f0;">{downtime}</strong></p>'
 
-    '<p style="font-size:15px;color:#18181b;margin:0 0 10px;line-height:1.6;{font}">'
-    '<span style="color:#71717a;">Noticed at: </span>'
-    '<strong>{recovered_at}</strong></p>'
+    '<p style="font-size:14px;color:#c5d0de;margin:0;line-height:1.6;{font}">'
+    '<span style="color:#889097;">Recovered at </span>'
+    '<strong style="color:#e2e8f0;">{recovered_at}</strong></p>'
 
-    '<div style="text-align:center;padding:20px 0 4px;">'
+    '</td></tr></table>'
+
+    '<div style="text-align:center;padding:24px 0 4px;">'
     '<a href="{status_url}" style="display:inline-block;padding:12px 32px;'
     'border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;'
     'color:#ffffff;background:#00d4aa;{font}">View Status Page</a>'
     '</div>'
     '</td></tr>'
 
-    '<tr><td style="text-align:center;padding:20px 36px;border-top:1px solid #e4e4e7;">'
-    '<p style="margin:0;font-size:12px;color:#a1a1aa;{font}">'
+    # Footer
+    '<tr><td style="text-align:center;padding:20px 36px;border-top:1px solid rgba(255,255,255,0.06);">'
+    '<p style="margin:0;font-size:12px;color:#889097;{font}">'
     'Powered by <a href="https://github.com/HellFireDevil18/Statrix" target="_blank"'
     ' style="color:#00d4aa;text-decoration:none;font-weight:600;">Statrix</a></p>'
     '</td></tr>'

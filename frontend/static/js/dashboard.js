@@ -1,8 +1,6 @@
 // This file is a part of Statrix
 // Coding : Priyanshu Dey [@HellFireDevil18]
 
-const API_BASE = window.location.origin;
-
 const state = {
     user: null,
     monitors: {
@@ -30,7 +28,7 @@ const state = {
     },
     serverDetailsView: null,
     serverHistoryCache: new Map(),
-    sidebarCollapsed: localStorage.getItem('sidebarCollapsed') !== 'false'
+    sidebarCollapsed: (() => { try { return localStorage.getItem('sidebarCollapsed') !== 'false'; } catch (_) { return true; } })()
 };
 
 const MONITOR_SOURCE = Object.freeze({
@@ -41,9 +39,100 @@ const MONITOR_SOURCE = Object.freeze({
 const DASHBOARD_POLL_MS = 60000;
 const CHECK_AGE_REFRESH_MS = 1000;
 const INCIDENT_RESOLVED_RETENTION_HOURS = 48;
+
+function getAllMonitors() {
+    return [
+        ...state.monitors.uptime.map(m => ({ ...m, monitorType: 'website' })),
+        ...state.monitors.heartbeat.map(m => ({ ...m, monitorType: 'heartbeat-cronjob' })),
+        ...state.monitors.server.map(m => ({ ...m, monitorType: 'heartbeat-server-agent' }))
+    ];
+}
+
+function animateCountUp(el, targetValue, duration = 400) {
+    if (!el) return;
+    const target = parseInt(targetValue, 10);
+    if (isNaN(target)) { el.textContent = targetValue; return; }
+    const current = parseInt(el.textContent, 10) || 0;
+    if (current === target) return;
+    const start = performance.now();
+    const diff = target - current;
+    function tick(now) {
+        const elapsed = now - start;
+        const progress = Math.min(elapsed / duration, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        el.textContent = Math.round(current + diff * eased);
+        if (progress < 1) requestAnimationFrame(tick);
+        else {
+            el.textContent = target;
+            el.classList.remove('value-updated');
+            void el.offsetWidth;
+            el.classList.add('value-updated');
+        }
+    }
+    requestAnimationFrame(tick);
+}
+const mobileSidebarMedia = window.matchMedia('(max-width: 768px)');
 let incidentTemplates = [];
 let incidentTemplateMap = {};
 let loadAllDataRequestSeq = 0;
+
+function isMobileSidebarViewport() {
+    return mobileSidebarMedia.matches;
+}
+
+function setMobileSidebarOpen(isOpen) {
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    const sidebarToggle = document.getElementById('sidebar-toggle');
+
+    if (!sidebar) return;
+
+    const shouldOpen = Boolean(isOpen) && isMobileSidebarViewport();
+    sidebar.classList.toggle('mobile-open', shouldOpen);
+    document.body.classList.toggle('sidebar-open', shouldOpen);
+
+    if (overlay) {
+        overlay.setAttribute('aria-hidden', shouldOpen ? 'false' : 'true');
+    }
+
+    if (mobileMenuBtn) {
+        mobileMenuBtn.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+        mobileMenuBtn.setAttribute('aria-label', shouldOpen ? 'Close navigation' : 'Open navigation');
+    }
+
+    if (sidebarToggle && isMobileSidebarViewport()) {
+        sidebarToggle.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+        sidebarToggle.setAttribute('aria-label', 'Close navigation');
+    }
+}
+
+function syncSidebarMode() {
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    const sidebarToggle = document.getElementById('sidebar-toggle');
+
+    if (!sidebar) return;
+
+    if (isMobileSidebarViewport()) {
+        sidebar.classList.remove('collapsed');
+        setMobileSidebarOpen(false);
+        return;
+    }
+
+    document.body.classList.remove('sidebar-open');
+    sidebar.classList.remove('mobile-open');
+    sidebar.classList.toggle('collapsed', state.sidebarCollapsed);
+
+    if (overlay) {
+        overlay.setAttribute('aria-hidden', 'true');
+    }
+
+    if (sidebarToggle) {
+        sidebarToggle.setAttribute('aria-expanded', state.sidebarCollapsed ? 'false' : 'true');
+        sidebarToggle.setAttribute('aria-label', 'Toggle sidebar');
+    }
+}
 
 function getUnifiedMonitorTypeKey(monitor) {
     const sourceType = monitor.monitorType || monitor._source;
@@ -220,33 +309,6 @@ function mergeStatusSinceValue(existingValue, incomingValue, existingStatus, inc
     return existingValue || null;
 }
 
-function formatDurationFromMs(diffMs) {
-    if (!Number.isFinite(diffMs) || diffMs <= 0) return '--';
-    const totalMinutes = Math.floor(diffMs / (1000 * 60));
-    const days = Math.floor(totalMinutes / (60 * 24));
-    const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
-    const minutes = totalMinutes % 60;
-    if (days > 0) return `${days}d ${hours}hr`;
-    if (hours > 0) return `${hours}hr ${minutes}min`;
-    return `${minutes}min`;
-}
-
-function formatCheckAge(ms) {
-    if (!ms) return '--';
-    const diffMs = Math.max(0, Date.now() - ms);
-    const totalSec = Math.floor(diffMs / 1000);
-    if (totalSec < 60) return `${Math.max(1, totalSec)}s`;
-
-    const totalMin = Math.floor(totalSec / 60);
-    if (totalMin < 60) return `${totalMin}m`;
-
-    const totalHour = Math.floor(totalMin / 60);
-    if (totalHour < 24) return `${totalHour}h`;
-
-    const totalDay = Math.floor(totalHour / 24);
-    return `${totalDay}d`;
-}
-
 function formatUptimeSeconds(totalSeconds) {
     if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return '--';
     const days = Math.floor(totalSeconds / 86400);
@@ -259,60 +321,18 @@ function formatUptimeSeconds(totalSeconds) {
     return `${seconds}s`;
 }
 
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
+let _checkAgeCells = null;
+let _upDownCells = null;
 
-function simplifyOsName(value) {
-    const raw = String(value || '').trim();
-    if (!raw) return '';
-
-    const lower = raw.toLowerCase();
-
-    if (lower.includes('windows 11')) return 'Windows 11';
-    if (lower.includes('windows 10')) return 'Windows 10';
-    if (lower.includes('windows server 2025')) return 'Windows Server 2025';
-    if (lower.includes('windows server 2022')) return 'Windows Server 2022';
-    if (lower.includes('windows server 2019')) return 'Windows Server 2019';
-    if (lower.includes('windows server 2016')) return 'Windows Server 2016';
-    if (lower.includes('windows server')) return 'Windows Server';
-    if (lower.includes('windows')) return 'Windows';
-    if (lower.includes('ubuntu')) return 'Ubuntu';
-    if (lower.includes('debian')) return 'Debian';
-    if (lower.includes('rocky')) return 'Rocky Linux';
-    if (lower.includes('almalinux')) return 'AlmaLinux';
-    if (lower.includes('centos')) return 'CentOS';
-    if (lower.includes('red hat') || lower.includes('rhel')) return 'RHEL';
-    if (lower.includes('amazon linux') || lower.includes('amzn')) return 'Amazon Linux';
-    if (lower.includes('fedora')) return 'Fedora';
-    if (lower.includes('opensuse')) return 'openSUSE';
-    if (lower.includes('suse')) return 'SUSE Linux';
-    if (lower.includes('linux mint')) return 'Linux Mint';
-    if (lower.includes('kali')) return 'Kali Linux';
-    if (lower.includes('arch')) return 'Arch Linux';
-    if (lower.includes('alpine')) return 'Alpine Linux';
-    if (lower.includes('gentoo')) return 'Gentoo';
-    if (lower.includes('darwin') || lower.includes('mac os') || lower.includes('macos')) return 'macOS';
-
-    const cleaned = raw
-        .replace(/\(.*?\)/g, ' ')
-        .replace(/gnu\/linux/ig, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-    if (!cleaned) return raw;
-    const primary = cleaned.split(/[,:;/]/)[0].trim();
-    return primary || cleaned;
+function invalidateAgeCellCache() {
+    _checkAgeCells = null;
+    _upDownCells = null;
 }
 
 function updateCheckAgeCells() {
-    document.querySelectorAll('.check-age[data-last-check-ts]').forEach((el) => {
-        const raw = el.getAttribute('data-last-check-ts');
-        const ms = raw ? Number(raw) : Number.NaN;
+    if (!_checkAgeCells) _checkAgeCells = document.querySelectorAll('.check-age[data-last-check-ts]');
+    _checkAgeCells.forEach((el) => {
+        const ms = Number(el.dataset.lastCheckTs);
         if (!Number.isFinite(ms) || ms <= 0) {
             el.textContent = '--';
             return;
@@ -329,9 +349,9 @@ function formatUpDownDuration(sinceMs) {
 }
 
 function updateUpDownCells() {
-    document.querySelectorAll('.up-down-age[data-status][data-status-since-ts]').forEach((el) => {
-        const raw = el.getAttribute('data-status-since-ts');
-        const sinceMs = raw ? Number(raw) : Number.NaN;
+    if (!_upDownCells) _upDownCells = document.querySelectorAll('.up-down-age[data-status][data-status-since-ts]');
+    _upDownCells.forEach((el) => {
+        const sinceMs = Number(el.dataset.statusSinceTs);
         el.textContent = formatUpDownDuration(sinceMs);
     });
 }
@@ -358,6 +378,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         setupLogout();
         setupSidebar();
         setupUserDropdown();
+        setupModal();
 
         await loadUserData();
         await loadAllData();
@@ -384,32 +405,56 @@ function setupSidebar() {
     const sidebar = document.getElementById('sidebar');
     const toggleBtn = document.getElementById('sidebar-toggle');
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    const sidebarOverlay = document.getElementById('sidebar-overlay');
 
-    if (state.sidebarCollapsed && sidebar) {
-        sidebar.classList.add('collapsed');
-    }
+    syncSidebarMode();
 
     if (toggleBtn) {
         toggleBtn.addEventListener('click', () => {
+            if (!sidebar) return;
+            if (isMobileSidebarViewport()) {
+                setMobileSidebarOpen(false);
+                return;
+            }
             sidebar.classList.toggle('collapsed');
             state.sidebarCollapsed = sidebar.classList.contains('collapsed');
-            localStorage.setItem('sidebarCollapsed', state.sidebarCollapsed);
+            try { localStorage.setItem('sidebarCollapsed', state.sidebarCollapsed); } catch (_) {}
+            toggleBtn.setAttribute('aria-expanded', state.sidebarCollapsed ? 'false' : 'true');
         });
     }
 
     if (mobileMenuBtn) {
         mobileMenuBtn.addEventListener('click', () => {
-            sidebar.classList.toggle('mobile-open');
+            setMobileSidebarOpen(!sidebar?.classList.contains('mobile-open'));
+        });
+    }
+
+    if (sidebarOverlay) {
+        sidebarOverlay.addEventListener('click', () => {
+            setMobileSidebarOpen(false);
         });
     }
 
     document.addEventListener('click', (e) => {
         if (sidebar && sidebar.classList.contains('mobile-open')) {
-            if (!sidebar.contains(e.target) && !mobileMenuBtn.contains(e.target)) {
-                sidebar.classList.remove('mobile-open');
+            const clickedMobileToggle = mobileMenuBtn ? mobileMenuBtn.contains(e.target) : false;
+            if (!sidebar.contains(e.target) && !clickedMobileToggle) {
+                setMobileSidebarOpen(false);
             }
         }
     });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            setMobileSidebarOpen(false);
+        }
+    });
+
+    if (typeof mobileSidebarMedia.addEventListener === 'function') {
+        mobileSidebarMedia.addEventListener('change', syncSidebarMode);
+    } else if (typeof mobileSidebarMedia.addListener === 'function') {
+        mobileSidebarMedia.addListener(syncSidebarMode);
+    }
 }
 
 function setupUserDropdown() {
@@ -442,11 +487,27 @@ function setupUserDropdown() {
 
     if (logoutBtnDropdown) {
         logoutBtnDropdown.addEventListener('click', () => {
-            localStorage.removeItem('statrix_token');
-            localStorage.removeItem('statrix_user');
+            try { localStorage.removeItem('statrix_token'); localStorage.removeItem('statrix_user'); } catch (_) {}
             window.location.href = '/edit';
         });
     }
+}
+
+function setupModal() {
+    const overlay = document.getElementById('modal-overlay');
+    if (!overlay) return;
+
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) {
+            hideModal();
+        }
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && overlay.classList.contains('active')) {
+            hideModal();
+        }
+    });
 }
 
 async function checkAuth() {
@@ -473,8 +534,7 @@ async function apiRequest(endpoint, options = {}) {
         });
 
         if (response.status === 401) {
-            localStorage.removeItem('statrix_token');
-            localStorage.removeItem('statrix_user');
+            try { localStorage.removeItem('statrix_token'); localStorage.removeItem('statrix_user'); } catch (_) {}
             window.location.href = '/edit';
             throw new Error('Unauthorized');
         }
@@ -524,7 +584,7 @@ async function loadUserData() {
             const freshUser = await response.json();
             if (freshUser && typeof freshUser === 'object') {
                 user = freshUser;
-                localStorage.setItem('statrix_user', JSON.stringify(freshUser));
+                try { localStorage.setItem('statrix_user', JSON.stringify(freshUser)); } catch (_) {}
             }
         }
     } catch (_) {
@@ -555,7 +615,11 @@ function updateUserUI() {
     const name = state.user.name || 'Admin';
 
     if (emailDisplay) emailDisplay.textContent = email || '--';
-    if (nameDisplay) nameDisplay.textContent = name;
+    if (nameDisplay) {
+        const hour = new Date().getHours();
+        const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+        nameDisplay.textContent = `${greeting}, ${name}`;
+    }
     if (initialDisplay) initialDisplay.textContent = initial;
 
     if (accountName) accountName.textContent = name;
@@ -565,23 +629,26 @@ function updateUserUI() {
     if (accountLastActivity) accountLastActivity.textContent = 'Just now';
 
     if (profileDisplay) {
+        const safeName = escapeHtml(name);
+        const safeEmail = escapeHtml(email || '--');
+        const safeRole = escapeHtml(state.user.role || 'Admin');
         profileDisplay.innerHTML = `
             <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem;">
                 <div style="width: 64px; height: 64px; background: linear-gradient(135deg, var(--primary) 0%, #369a93 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: bold; color: #fff;">
                     ${initial}
                 </div>
                 <div>
-                    <h4 style="margin: 0; font-size: 1.1rem; color: #fff;">${name}</h4>
-                    <p class="text-muted" style="margin: 0;">${email || '--'}</p>
+                    <h4 style="margin: 0; font-size: 1.1rem; color: #fff;">${safeName}</h4>
+                    <p class="text-muted" style="margin: 0;">${safeEmail}</p>
                 </div>
             </div>
             <div class="settings-item">
                 <span class="settings-label">Role</span>
-                <span class="settings-value">${state.user.role || 'Admin'}</span>
+                <span class="settings-value">${safeRole}</span>
             </div>
             <div class="settings-item">
                 <span class="settings-label">Email</span>
-                <span class="settings-value">${email || '--'}</span>
+                <span class="settings-value">${safeEmail}</span>
             </div>
             <div class="settings-item">
                 <span class="settings-label">Joined</span>
@@ -967,8 +1034,7 @@ function switchTab(tabName) {
     const pageTitleEl = document.getElementById('page-title');
     if (pageTitleEl) pageTitleEl.textContent = titles[tabName] || 'Dashboard';
 
-    const sidebar = document.getElementById('sidebar');
-    if (sidebar) sidebar.classList.remove('mobile-open');
+    setMobileSidebarOpen(false);
 
     refreshCurrentView();
 }
@@ -980,24 +1046,8 @@ function filterMonitors(type) {
     let monitors = [];
     let containerId = '';
 
-    switch (type) {
-        case 'uptime':
-            monitors = [
-                ...state.monitors.uptime.map(m => ({ ...m, monitorType: 'website' })),
-                ...state.monitors.heartbeat.map(m => ({ ...m, monitorType: 'heartbeat-cronjob' })),
-                ...state.monitors.server.map(m => ({ ...m, monitorType: 'heartbeat-server-agent' }))
-            ];
-            containerId = 'uptime-monitors-list';
-            break;
-        default:
-            monitors = [
-                ...state.monitors.uptime.map(m => ({ ...m, monitorType: 'website' })),
-                ...state.monitors.heartbeat.map(m => ({ ...m, monitorType: 'heartbeat-cronjob' })),
-                ...state.monitors.server.map(m => ({ ...m, monitorType: 'heartbeat-server-agent' }))
-            ];
-            containerId = 'uptime-monitors-list';
-            break;
-    }
+    monitors = getAllMonitors();
+    containerId = 'uptime-monitors-list';
 
     let filtered = monitors;
 
@@ -1064,7 +1114,7 @@ function filterMonitors(type) {
 
             switch (sortBy) {
                 case 'name':
-                    comparison = a.name.localeCompare(b.name);
+                    comparison = String(a.name || '').localeCompare(String(b.name || ''));
                     break;
                 case 'added':
                     const addedA = a.created_at ? new Date(a.created_at).getTime() : 0;
@@ -1135,6 +1185,14 @@ function positionDropdownMenu(type, menuKey) {
     const rect = button.getBoundingClientRect();
     const menuRect = menu.getBoundingClientRect();
     const top = rect.bottom + window.scrollY + 6;
+
+    if (window.innerWidth <= 640) {
+        menu.style.top = `${top}px`;
+        menu.style.left = '16px';
+        menu.style.right = '16px';
+        return;
+    }
+
     let left = rect.right + window.scrollX - menuRect.width;
 
     if (!menuRect.width) {
@@ -1287,13 +1345,13 @@ function updateStats() {
     }
 
     const statrixWebsiteTotal = document.getElementById('statrix-website-total');
-    if (statrixWebsiteTotal) statrixWebsiteTotal.textContent = `${websiteTotal}`;
+    animateCountUp(statrixWebsiteTotal, websiteTotal);
 
     const statrixHeartbeatTotal = document.getElementById('statrix-heartbeat-total');
-    if (statrixHeartbeatTotal) statrixHeartbeatTotal.textContent = `${heartbeatTotal}`;
+    animateCountUp(statrixHeartbeatTotal, heartbeatTotal);
 
     const statrixServerTotal = document.getElementById('statrix-server-total');
-    if (statrixServerTotal) statrixServerTotal.textContent = `${serverTotal}`;
+    animateCountUp(statrixServerTotal, serverTotal);
 
     const overallUptimeEl = document.getElementById('overall-uptime-value');
     if (overallUptimeEl) overallUptimeEl.textContent = `${uptimePercent}%`;
@@ -1349,7 +1407,15 @@ function updateStats() {
     }
 
     const accountUptimeEl = document.getElementById('account-uptime');
-    if (accountUptimeEl) accountUptimeEl.textContent = `${uptimePercent}%`;
+    if (accountUptimeEl) {
+        const newVal = `${uptimePercent}%`;
+        if (accountUptimeEl.textContent !== newVal) {
+            accountUptimeEl.textContent = newVal;
+            accountUptimeEl.classList.remove('value-updated');
+            void accountUptimeEl.offsetWidth;
+            accountUptimeEl.classList.add('value-updated');
+        }
+    }
 
     const uptimeCountEl = document.getElementById('uptime-count');
     const serverCountEl = document.getElementById('server-count');
@@ -1370,11 +1436,7 @@ function loadOverview() {
 }
 
 function loadUptimeTab() {
-    const allMonitors = [
-        ...state.monitors.uptime.map(m => ({ ...m, monitorType: 'website' })),
-        ...state.monitors.heartbeat.map(m => ({ ...m, monitorType: 'heartbeat-cronjob' })),
-        ...state.monitors.server.map(m => ({ ...m, monitorType: 'heartbeat-server-agent' }))
-    ];
+    const allMonitors = getAllMonitors();
 
     const activeTypeTab = document.querySelector('.monitor-type-tab.active');
     const filterType = activeTypeTab ? activeTypeTab.dataset.type : 'all';
@@ -1809,6 +1871,7 @@ function getServerUsageBarsHtml(monitor) {
 }
 
 function renderMonitorTable(monitors, containerId, isOverview = false, type = null, showActions = null) {
+    invalidateAgeCellCache();
     const container = document.getElementById(containerId);
     if (!container) return;
 
@@ -1930,6 +1993,7 @@ function renderMonitorTable(monitors, containerId, isOverview = false, type = nu
         const canOpenDetails = true;
         const isPaused = !m.enabled;
 
+        const isMaintenanceMode = m.maintenance_mode === true;
         let actions = '';
         if (showActions) {
             actions = `
@@ -1942,6 +2006,9 @@ function renderMonitorTable(monitors, containerId, isOverview = false, type = nu
                 <button class="btn-action-icon" onclick="openMonitorTools('${sourceType}', '${m.id}')" title="Monitor Tools">
                     <i class="fas fa-cog"></i>
                 </button>
+                <button class="btn-action-icon mobile-maintenance-btn" onclick="${isMaintenanceMode ? `endMaintenanceMode('${sourceType}', '${m.id}')` : `setMaintenanceMode('${sourceType}', '${m.id}')`}" title="${isMaintenanceMode ? 'End Maintenance' : 'Maintenance Mode'}">
+                    <i class="fas fa-${isMaintenanceMode ? 'check-circle' : 'wrench'}" style="color: ${isMaintenanceMode ? '#44b6ae' : 'inherit'};"></i>
+                </button>
             `;
         }
 
@@ -1953,7 +2020,18 @@ function renderMonitorTable(monitors, containerId, isOverview = false, type = nu
         else if (statusClass === 'paused') statusText = 'Paused';
         else statusText = 'Unknown';
 
+        const mobileSummaryBits = [
+            `<span class="monitor-mobile-chip">${escapeHtml(getSourceTypeLabel(sourceType, m))}</span>`,
+            lastCheckText !== '--' ? `<span class="monitor-mobile-chip">Check ${escapeHtml(lastCheckText)}</span>` : '',
+            upDownDuration !== '--' ? `<span class="monitor-mobile-chip">Since ${escapeHtml(upDownDuration)}</span>` : '',
+            addedDate !== '--' ? `<span class="monitor-mobile-chip">Added ${escapeHtml(addedDate)}</span>` : ''
+        ].filter(Boolean);
+        const mobileSummaryHtml = mobileSummaryBits.length > 0
+            ? `<div class="monitor-mobile-summary">${mobileSummaryBits.join('')}</div>`
+            : '';
+
         const monitorId = String(m.id);
+        const statusBubble = `<span class="monitor-status-bubble status-${statusClass}">${escapeHtml(statusText)}</span>`;
         const monitorNameMarkup = sourceType === MONITOR_SOURCE.HEARTBEAT_SERVER_AGENT && !isOverview
             ? (
                 canOpenDetails
@@ -1961,12 +2039,14 @@ function renderMonitorTable(monitors, containerId, isOverview = false, type = nu
                 <a href="#" class="monitor-name-link server-name-link" onclick="return openDashboardMonitorDetails(event, '${sourceType}', '${monitorId}')">
                     <i class="fas fa-chevron-right server-name-chevron"></i>
                     <span class="monitor-name-text">${escapeHtml(m.name)}</span>
+                    ${statusBubble}
                 </a>
             `
                     : `
                 <span class="server-name-link">
                     <i class="fas fa-chevron-right server-name-chevron"></i>
                     <span class="monitor-name-text">${escapeHtml(m.name)}</span>
+                    ${statusBubble}
                 </span>
             `
             )
@@ -1975,10 +2055,12 @@ function renderMonitorTable(monitors, containerId, isOverview = false, type = nu
                     ? `
                 <a href="#" class="monitor-name-link" onclick="return openDashboardMonitorDetails(event, '${sourceType}', '${monitorId}')">
                     <span class="monitor-name-text">${escapeHtml(m.name)}</span>
+                    ${statusBubble}
                 </a>
             `
                     : `
                 <span class="monitor-name-text">${escapeHtml(m.name)}</span>
+                ${statusBubble}
             `
             );
 
@@ -1988,34 +2070,35 @@ function renderMonitorTable(monitors, containerId, isOverview = false, type = nu
 
         html += `
             <tr class="data-row" data-id="${m.id}">
-                <td class="col-name ${sourceType === MONITOR_SOURCE.HEARTBEAT_SERVER_AGENT && !isOverview ? 'server-name-cell' : ''}">
+                <td class="col-name ${sourceType === MONITOR_SOURCE.HEARTBEAT_SERVER_AGENT && !isOverview ? 'server-name-cell' : ''}" data-label="Monitor">
                     <div class="monitor-name-info">
                         ${monitorNameMarkup}
                         ${metricsHtml}
                         ${subText ? `<span class="monitor-sub-text">${subText}</span>` : ''}
+                        ${mobileSummaryHtml}
                     </div>
                 </td>
                 ${!isOverview ? `
-                <td class="col-uptime">
+                <td class="col-uptime" data-label="Uptime">
                     <div class="uptime-cell-content">
                         <span class="uptime-percent">${uptimeMarkup}</span>
                         ${uptimeBarHtml}
                 </div>
                 </td>
                 ` : ''}
-                <td class="col-type">
+                <td class="col-type" data-label="Type">
                     <span class="type-badge">${badge}</span>
                 </td>
-                <td class="col-up-down">
+                <td class="col-up-down" data-label="Since">
                     <span class="up-down-age" data-status="${statusClass}" data-status-since-ts="${statusSinceMs || ''}" style="color: ${upDownColor};">${upDownDuration}</span>
                 </td>
-                <td class="col-added">
+                <td class="col-added" data-label="Added">
                     ${addedDate}
                 </td>
-                <td class="col-check">
+                <td class="col-check" data-label="Check">
                     <span class="check-age" data-last-check-ts="${lastCheckTimestampMs || ''}">${lastCheckText}</span>
                 </td>
-                <td class="col-status">
+                <td class="col-status" data-label="Status">
                     <div class="status-dropdown" style="position: relative; display: inline-block;">
                         <button class="status-dropdown-btn dropdown-toggle ${statusBadgeClass}" onclick="toggleStatusDropdown(event, this)" style="border: none; background: transparent; cursor: pointer; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600;">
                             ${statusText} <i class="fas fa-caret-down" style="margin-left: 4px; font-size: 10px;"></i>
@@ -2026,7 +2109,7 @@ function renderMonitorTable(monitors, containerId, isOverview = false, type = nu
                     </div>
                 </td>
                 ${showActions ? `
-                <td class="col-actions">
+                <td class="col-actions" data-label="Actions">
                     <div class="action-buttons">${actions}</div>
                 </td>
                 ` : ''}
@@ -2115,6 +2198,11 @@ function getSeriesStats(values) {
 function setServerMetricText(elementId, value) {
     const el = document.getElementById(elementId);
     if (el) el.textContent = value;
+    const card = document.getElementById(elementId + '-card');
+    if (card) {
+        const isEmpty = !value || value === '--' || value === '-- / --' || value === '-- / -- / --';
+        card.style.display = isEmpty ? 'none' : '';
+    }
 }
 
 function decodeMaybeBase64(value) {
@@ -2314,8 +2402,10 @@ function renderServerDetailTables(lastPoint) {
 
     const nicBody = document.getElementById('server-nic-table-body');
     if (nicBody) {
-        nicBody.innerHTML = nicRows.length > 0
-            ? nicRows.map((row) => {
+        const nicCard = nicBody.closest('.server-detail-table-card');
+        if (nicRows.length > 0) {
+            if (nicCard) nicCard.style.display = '';
+            nicBody.innerHTML = nicRows.map((row) => {
                 const total = Math.max(row.total, 1);
                 const inboundWidth = (row.inbound / total) * 100;
                 const outboundWidth = (row.outbound / total) * 100;
@@ -2333,14 +2423,18 @@ function renderServerDetailTables(lastPoint) {
                         </td>
                     </tr>
                 `;
-            }).join('')
-            : '<tr><td colspan="3" class="server-detail-empty-row">No interface usage data in latest report.</td></tr>';
+            }).join('');
+        } else {
+            if (nicCard) nicCard.style.display = 'none';
+        }
     }
 
     const diskBody = document.getElementById('server-disk-table-body');
     if (diskBody) {
-        diskBody.innerHTML = diskRows.length > 0
-            ? diskRows.map((row) => {
+        const diskCard = diskBody.closest('.server-detail-table-card');
+        if (diskRows.length > 0) {
+            if (diskCard) diskCard.style.display = '';
+            diskBody.innerHTML = diskRows.map((row) => {
                 const usage = row.usagePercent === null ? 0 : row.usagePercent;
                 const toneClass = usage >= 90
                     ? 'server-disk-usage-fill-danger'
@@ -2364,8 +2458,16 @@ function renderServerDetailTables(lastPoint) {
                         </td>
                     </tr>
                 `;
-            }).join('')
-            : '<tr><td colspan="6" class="server-detail-empty-row">No disk usage data in latest report.</td></tr>';
+            }).join('');
+        } else {
+            if (diskCard) diskCard.style.display = 'none';
+        }
+    }
+
+    const tableGrid = document.querySelector('.server-detail-table-grid');
+    if (tableGrid) {
+        const anyVisible = tableGrid.querySelector('.server-detail-table-card:not([style*="display: none"])');
+        tableGrid.style.display = anyVisible ? '' : 'none';
     }
 }
 
@@ -2713,51 +2815,51 @@ async function showServerMetrics(serverId) {
         </div>
         <div class="modal-body server-details-body">
             <div class="metrics-grid server-details-info-grid">
-                <div class="metric-card">
+                ${os !== '--' ? `<div class="metric-card">
                     <div class="metric-label">OS</div>
                     <div class="metric-value metric-value-truncate" title="${escapeHtml(osRaw)}">${escapeHtml(os)}</div>
-                </div>
-                <div class="metric-card">
+                </div>` : ''}
+                ${kernel !== '--' ? `<div class="metric-card">
                     <div class="metric-label">Kernel</div>
                     <div class="metric-value metric-value-truncate" title="${escapeHtml(kernel)}">${escapeHtml(kernel)}</div>
-                </div>
-                <div class="metric-card">
+                </div>` : ''}
+                ${cpuModel !== '--' ? `<div class="metric-card">
                     <div class="metric-label">CPU</div>
                     <div class="metric-value metric-value-truncate" title="${escapeHtml(cpuModel)}">${escapeHtml(cpuModel)}</div>
-                </div>
-                <div class="metric-card">
+                </div>` : ''}
+                ${ramSize !== '--' ? `<div class="metric-card">
                     <div class="metric-label">RAM</div>
                     <div class="metric-value">${escapeHtml(ramSize)}</div>
-                </div>
-                <div class="metric-card">
+                </div>` : ''}
+                ${server.sid ? `<div class="metric-card">
                     <div class="metric-label">SID</div>
-                    <div class="metric-value metric-value-mono metric-value-truncate" title="${escapeHtml(server.sid || '--')}">${escapeHtml(server.sid || '--')}</div>
-                </div>
-                <div class="metric-card">
+                    <div class="metric-value metric-value-mono metric-value-truncate" title="${escapeHtml(server.sid)}">${escapeHtml(server.sid)}</div>
+                </div>` : ''}
+                ${cpuTopology !== '--' ? `<div class="metric-card">
                     <div class="metric-label">Cores / Threads</div>
                     <div class="metric-value">${escapeHtml(cpuTopology)}</div>
-                </div>
-                <div class="metric-card">
+                </div>` : ''}
+                <div class="metric-card" id="server-metric-cpu-card">
                     <div class="metric-label">CPU Usage</div>
                     <div class="metric-value" id="server-metric-cpu">--</div>
                 </div>
-                <div class="metric-card">
+                <div class="metric-card" id="server-metric-ram-card">
                     <div class="metric-label">RAM Usage</div>
                     <div class="metric-value" id="server-metric-ram">--</div>
                 </div>
-                <div class="metric-card">
+                <div class="metric-card" id="server-metric-disk-card">
                     <div class="metric-label">Disk Usage</div>
                     <div class="metric-value" id="server-metric-disk">--</div>
                 </div>
-                <div class="metric-card">
+                <div class="metric-card" id="server-metric-network-card">
                     <div class="metric-label">Network</div>
                     <div class="metric-value metric-value-truncate" id="server-metric-network">--</div>
                 </div>
-                <div class="metric-card">
+                <div class="metric-card" id="server-metric-load-card">
                     <div class="metric-label">Load (1/5/15)</div>
                     <div class="metric-value" id="server-metric-load">--</div>
                 </div>
-                <div class="metric-card">
+                <div class="metric-card" id="server-metric-iowait-steal-card">
                     <div class="metric-label">IOWait / Steal</div>
                     <div class="metric-value" id="server-metric-iowait-steal">--</div>
                 </div>
@@ -2889,31 +2991,52 @@ function showModal(content) {
     if (modalContainer) {
         modalContainer.classList.remove('modal-agent-command');
         modalContainer.classList.remove('modal-server-details');
+        const oldHeader = modalContainer.querySelector(':scope > .modal-header');
+        if (oldHeader) oldHeader.remove();
+        const oldFooter = modalContainer.querySelector(':scope > .modal-footer');
+        if (oldFooter) oldFooter.remove();
     }
     contentDiv.innerHTML = content;
+    contentDiv.scrollTop = 0;
+
+    if (modalContainer) {
+        const header = contentDiv.querySelector('.modal-header');
+        if (header) modalContainer.insertBefore(header, contentDiv);
+        const footer = contentDiv.querySelector('.modal-footer');
+        if (footer) modalContainer.appendChild(footer);
+    }
+
+    document.body.classList.add('modal-open');
     overlay.classList.add('active');
     overlay.classList.add('show');
     overlay.style.opacity = '1';
     overlay.style.visibility = 'visible';
     overlay.style.pointerEvents = 'all';
+    overlay.setAttribute('aria-hidden', 'false');
     if (modalContainer) {
-        modalContainer.style.display = 'block';
+        modalContainer.style.display = '';
         modalContainer.style.transform = 'scale(1)';
     }
 }
 
 function hideModal() {
     const overlay = document.getElementById('modal-overlay');
+    document.body.classList.remove('modal-open');
     overlay.classList.remove('active');
     overlay.classList.remove('show');
     overlay.style.opacity = '';
     overlay.style.visibility = '';
     overlay.style.pointerEvents = '';
+    overlay.setAttribute('aria-hidden', 'true');
     const modalContainer = document.getElementById('modal-container');
     if (modalContainer) {
         modalContainer.style.transform = '';
         modalContainer.classList.remove('modal-agent-command');
         modalContainer.classList.remove('modal-server-details');
+        const hoistedHeader = modalContainer.querySelector(':scope > .modal-header');
+        if (hoistedHeader) hoistedHeader.remove();
+        const hoistedFooter = modalContainer.querySelector(':scope > .modal-footer');
+        if (hoistedFooter) hoistedFooter.remove();
     }
     state.serverDetailsView = null;
     destroyServerChart();
@@ -2935,7 +3058,7 @@ function showToast(message, type = 'info', duration = 3000) {
 
     toast.innerHTML = `
         <i class="fas fa-${icon} toast-icon"></i>
-        <span class="toast-message">${message}</span>
+        <span class="toast-message">${escapeHtml(message)}</span>
         <button class="toast-close" onclick="this.parentElement.remove()">
             <i class="fas fa-times"></i>
         </button>
@@ -2968,25 +3091,25 @@ async function showMonitorDetails(id) {
             <h2 class="modal-title">${escapeHtml(monitor.name || 'Monitor')}</h2>
         </div>
         <div class="modal-body">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+            <div class="monitor-details-grid">
                 <div class="form-group">
                     <label>Type</label>
-                    <div>${getSourceTypeLabel(sourceType, monitor)}</div>
+                    <div class="monitor-detail-value">${escapeHtml(getSourceTypeLabel(sourceType, monitor))}</div>
                 </div>
                 <div class="form-group">
                     <label>Status</label>
-                    <div>${monitor.enabled ? 'Enabled' : 'Disabled'}</div>
+                    <div class="monitor-detail-value">${escapeHtml(monitor.enabled ? 'Enabled' : 'Disabled')}</div>
                 </div>
                 ${monitor.target ? `
                     <div class="form-group">
                         <label>Target</label>
-                        <div>${monitor.target}</div>
+                        <div class="monitor-detail-value">${escapeHtml(monitor.target)}</div>
                     </div>
                 ` : ''}
                 ${monitor.created_at ? `
                     <div class="form-group">
                         <label>Created</label>
-                        <div>${new Date(monitor.created_at).toLocaleString()}</div>
+                        <div class="monitor-detail-value">${escapeHtml(new Date(monitor.created_at).toLocaleString())}</div>
                     </div>
                 ` : ''}
             </div>
@@ -3166,6 +3289,8 @@ function showAddMonitorModal(type = 'website', editId = null) {
     overlay.style.opacity = '1';
     overlay.style.visibility = 'visible';
     overlay.style.pointerEvents = 'all';
+    overlay.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('modal-open');
     modalContainer.style.display = 'block';
     modalContainer.style.transform = 'scale(1)';
 
@@ -3192,13 +3317,13 @@ function getAddMonitorModalHTML(initialType, isEdit = false) {
     const submitLabel = isEdit ? 'Update Monitor' : 'Add Monitor';
     const submitIcon = isEdit ? 'fa-save' : 'fa-plus';
     return `
-        <div class="add-monitor-modal" style="background:#232930; color:#fff; padding:0; border-radius:8px; max-height:80vh; overflow-y:auto;">
-            <div style="padding:20px 24px 12px; border-bottom:1px solid #2d343d; display:flex; justify-content:space-between; align-items:center;">
+        <div class="add-monitor-modal">
+            <div class="add-monitor-modal-header">
                 <h2 style="margin:0; font-size:1.15rem; font-weight:600; color:#fff;">
                     <i class="fas ${titleIcon}" style="color:#44b6ae; margin-right:8px;"></i>${title}
                 </h2>
             </div>
-            <div style="padding:20px 24px;">
+            <div class="add-monitor-modal-body">
                 <form id="add-monitor-form" onsubmit="return false;">
                     <div class="form-group" style="margin-bottom:16px;">
                         <label style="display:block; margin-bottom:6px; font-size:0.85rem; color:#c0c6ce; font-weight:500;">Monitor Type</label>
@@ -3220,7 +3345,7 @@ function getAddMonitorModalHTML(initialType, isEdit = false) {
                         <div id="monitor-advanced-fields"></div>
                     </div>
 
-                    <div style="padding-top:16px; border-top:1px solid #2d343d; margin-top:16px; display:flex; justify-content:flex-end; gap:10px;">
+                    <div class="add-monitor-modal-actions">
                         <button type="button" class="btn btn-secondary" onclick="hideModal()" style="padding:9px 18px;">Cancel</button>
                         <button type="button" class="btn btn-primary" id="add-monitor-submit-btn" onclick="submitAddMonitor()" style="padding:9px 24px; background:#44b6ae; border-color:#44b6ae;">
                             <i class="fas ${submitIcon}"></i> ${submitLabel}
@@ -3799,7 +3924,7 @@ async function showServerAgentCommandCenter(id, mode = 'install', platform = 'li
                         <i class="fas fa-times-circle"></i> Uninstall
                     </button>
                 </div>
-                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <div class="agent-command-actions">
                     <button class="btn btn-danger" onclick="showDeleteMonitorDialog('${MONITOR_SOURCE.HEARTBEAT_SERVER_AGENT}', '${id}', '${modeValue}', '${platformValue}')">
                         <i class="fas fa-trash-alt"></i> Delete Monitor
                     </button>
@@ -3896,10 +4021,18 @@ function updateReportSummary(period) {
     }
 
     if (reportUptimeEl) {
-        reportUptimeEl.textContent = uptimePercent !== null ? `${uptimePercent.toFixed(4)}%` : '--';
+        const newText = uptimePercent !== null ? `${uptimePercent.toFixed(4)}%` : '--';
+        if (reportUptimeEl.textContent !== newText) {
+            reportUptimeEl.textContent = newText;
+            reportUptimeEl.classList.remove('value-updated');
+            void reportUptimeEl.offsetWidth;
+            reportUptimeEl.classList.add('value-updated');
+        }
     }
 
-    if (reportIncidentsEl) reportIncidentsEl.textContent = state.incidents.length;
+    if (reportIncidentsEl) {
+        animateCountUp(reportIncidentsEl, state.incidents.length);
+    }
 
     const monitorsWithResponse = state.monitors.uptime.filter(m => m.response_time_avg != null);
     if (monitorsWithResponse.length > 0) {
@@ -4136,22 +4269,22 @@ function loadMonitorBreakdown() {
 
         return `
                         <tr>
-                            <td>
-                                <div style="font-weight: 600; color: #fff;">${m.name}</div>
+                            <td data-label="Monitor">
+                                <div class="report-monitor-name">${escapeHtml(m.name)}</div>
                             </td>
-                            <td>
+                            <td data-label="Type">
                                 <span class="status-badge status-paused">${m.category}</span>
                             </td>
-                            <td>
-                                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                            <td data-label="Uptime">
+                                <div class="report-uptime-metric">
                                     <div class="uptime-bar-container">
                                         <div class="uptime-bar" style="width: ${uptime !== null ? uptime : 0}%"></div>
                                     </div>
                                     <span style="font-weight: 600;">${uptime !== null ? `${uptime.toFixed(2)}%` : '--'}</span>
                                 </div>
                             </td>
-                            ${showResponse ? `<td>${response !== null ? `${response} ms` : '--'}</td>` : ''}
-                            ${showChecks ? `<td>${Number.isFinite(checks) ? formatNumber(checks) : '--'}</td>` : ''}
+                            ${showResponse ? `<td data-label="Avg Response">${response !== null ? `${response} ms` : '--'}</td>` : ''}
+                            ${showChecks ? `<td data-label="Total Checks">${Number.isFinite(checks) ? formatNumber(checks) : '--'}</td>` : ''}
                         </tr>
                     `;
     }).join('')}
@@ -4643,39 +4776,58 @@ async function makePrivate(type, id) {
     }
 }
 
+function _findMonitorInState(type, id) {
+    const groupKey = getMonitorGroupKey(type);
+    const list = state.monitors[groupKey];
+    if (!list) return null;
+    return list.find(m => String(m.id) === String(id)) || null;
+}
+
+function _optimisticMaintenanceToggle(type, id, enable) {
+    const monitor = _findMonitorInState(type, id);
+    if (monitor) {
+        monitor.maintenance_mode = enable;
+    }
+    refreshCurrentView();
+}
+
 async function setMaintenanceMode(type, id) {
+    _optimisticMaintenanceToggle(type, id, true);
     try {
         const endpoint = `/api/maintenance/${encodeURIComponent(type)}/${id}/start`;
-        const res = await apiRequest(endpoint, {
-            method: 'POST'
-        });
+        const res = await apiRequest(endpoint, { method: 'POST' });
 
         if (res.ok) {
             showToast('Maintenance mode enabled', 'success');
-            await loadAllData();
         } else {
+            _optimisticMaintenanceToggle(type, id, false);
             const message = await readApiError(res, 'Failed to enable maintenance mode');
             showToast(message, 'error');
         }
+        loadAllData();
     } catch (error) {
+        _optimisticMaintenanceToggle(type, id, false);
         console.error('Error enabling maintenance mode:', error);
         showToast('Error enabling maintenance mode', 'error');
     }
 }
 
 async function endMaintenanceMode(type, id) {
+    _optimisticMaintenanceToggle(type, id, false);
     try {
         const endpoint = `/api/maintenance/${encodeURIComponent(type)}/${id}/end`;
         const res = await apiRequest(endpoint, { method: 'POST' });
 
         if (res.ok) {
             showToast('Maintenance mode ended', 'success');
-            await loadAllData();
         } else {
+            _optimisticMaintenanceToggle(type, id, true);
             const message = await readApiError(res, 'Failed to end maintenance mode');
             showToast(message, 'error');
         }
+        loadAllData();
     } catch (error) {
+        _optimisticMaintenanceToggle(type, id, true);
         console.error('Error ending maintenance mode:', error);
         showToast('Error ending maintenance mode', 'error');
     }

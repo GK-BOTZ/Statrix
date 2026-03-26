@@ -1,10 +1,6 @@
 /* This file is a part of Statrix */
 /* Coding : Priyanshu Dey [@HellFireDevil18] */
 
-.hidden {
-    display: none;
-}
-
 .login-page {
     min-height: 100vh;
     display: flex;
@@ -24,7 +20,10 @@
         0 8px 32px rgba(0, 0, 0, 0.3),
         inset 0 1px 0 rgba(255, 255, 255, 0.1),
         0 0 0 1px rgba(0, 212, 170, 0.1);
-    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        transform var(--motion-medium) var(--ease-out-quint),
+        box-shadow var(--motion-medium) var(--ease-out-quint),
+        border-color var(--motion-medium) var(--ease-out-quint);
 }
 
 @media (min-width: 769px) {
@@ -58,7 +57,9 @@
     box-shadow:
         0 4px 12px rgba(0, 0, 0, 0.15),
         0 2px 4px rgba(0, 0, 0, 0.1);
-    transition: transform 0.3s ease, box-shadow 0.3s ease;
+    transition:
+        transform var(--motion-medium) var(--ease-out-quart),
+        box-shadow var(--motion-medium) var(--ease-out-quart);
     margin-bottom: 16px;
 }
 
@@ -110,7 +111,10 @@
     border-radius: 12px;
     color: #fff;
     font-size: 14px;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        border-color var(--motion-fast) var(--ease-out-quart),
+        box-shadow var(--motion-fast) var(--ease-out-quart),
+        background-color var(--motion-fast) var(--ease-out-quart);
     box-sizing: border-box;
 }
 
@@ -145,35 +149,29 @@
     font-weight: 600;
     font-size: 14px;
     cursor: pointer;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        transform var(--motion-fast) var(--ease-out-quart),
+        box-shadow var(--motion-fast) var(--ease-out-quart),
+        background-color var(--motion-fast) var(--ease-out-quart),
+        border-color var(--motion-fast) var(--ease-out-quart),
+        color var(--motion-fast) var(--ease-out-quart);
     border: 1px solid transparent;
     gap: 8px;
     letter-spacing: 0.3px;
     width: 100%;
 }
 
-.btn-primary {
-    background: linear-gradient(135deg, #00d4aa 0%, #00b894 100%);
-    color: #fff;
-    border: none;
-    box-shadow: 0 2px 12px rgba(0, 212, 170, 0.3);
-    font-weight: 600;
-}
-
-.btn-primary:hover {
-    background: linear-gradient(135deg, #00e5ba 0%, #00c9a4 100%);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 20px rgba(0, 212, 170, 0.4);
-}
-
-.btn-primary:active {
+.btn:active {
     transform: translateY(0) scale(0.98);
-    transition-duration: 0.1s;
 }
 
 .btn-loader {
     display: inline-flex;
     align-items: center;
+}
+
+.btn-loader.hidden {
+    display: none;
 }
 
 .spinner-small {
@@ -187,10 +185,6 @@
     vertical-align: middle;
 }
 
-@keyframes spin {
-    to { transform: rotate(360deg); }
-}
-
 .login-footer {
     text-align: center;
     color: #889097;
@@ -201,7 +195,7 @@
 .login-footer a {
     color: #00d4aa;
     text-decoration: none;
-    transition: color 0.2s;
+    transition: color var(--motion-fast) var(--ease-out-quart);
     font-weight: 500;
 }
 
@@ -232,5 +226,16 @@
     .login-container {
         -webkit-backdrop-filter: none !important;
         backdrop-filter: none !important;
+    }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .login-container {
+        animation: riseIn var(--motion-entrance) var(--ease-out-quint) both;
+    }
+
+    .login-header img {
+        animation: riseIn var(--motion-entrance) var(--ease-out-quint) both;
+        animation-delay: 80ms;
     }
 }

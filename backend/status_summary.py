@@ -1326,19 +1326,6 @@ class StatusSummaryService:
             rec["down_minutes"][idx] = int(counts.get("down") or 0)
             rec["maintenance_minutes"][idx] = int(counts.get("maintenance") or 0)
 
-    def _set_today_counts(self, rec: dict[str, Any], up: int, down: int, maintenance: int) -> None:
-        idx = self.day_slots - 1
-        old_up = int(rec["up_minutes"][idx] or 0)
-        old_down = int(rec["down_minutes"][idx] or 0)
-        old_maintenance = int(rec["maintenance_minutes"][idx] or 0)
-        rec["up_minutes"][idx] = int(up)
-        rec["down_minutes"][idx] = int(down)
-        rec["maintenance_minutes"][idx] = int(maintenance)
-        rec["total_up"] = int(rec.get("total_up") or 0) - old_up + int(up)
-        rec["total_down"] = int(rec.get("total_down") or 0) - old_down + int(down)
-        rec["total_maintenance"] = int(rec.get("total_maintenance") or 0) - old_maintenance + int(maintenance)
-        self._recompute_code(rec, idx)
-
     def _recompute_all_codes(self, rec: dict[str, Any]) -> None:
         for idx in range(self.day_slots):
             self._recompute_code(rec, idx)

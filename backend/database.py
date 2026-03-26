@@ -568,23 +568,6 @@ class Database:
         }
         return {"entities": entities, "indexes": indexes}
 
-    @staticmethod
-    def _group_series_rows(
-        series_kind: str,
-        rows: list,
-        group_key: str | None,
-    ) -> dict[Any, list[dict[str, Any]]]:
-        grouped: dict[Any, list[dict[str, Any]]] = {}
-        if series_kind == "maintenance_events":
-            for row in rows:
-                key = (row["monitor_type"], row["monitor_id"])
-                grouped.setdefault(key, []).append(dict(row))
-        else:
-            for row in rows:
-                gid = row[group_key]
-                grouped.setdefault(gid, []).append(dict(row))
-        return grouped
-
     _STREAM_BATCH_SIZE = 500
 
     async def _stream_series_to_cache(

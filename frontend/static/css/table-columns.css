@@ -61,6 +61,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-width: 0;
 }
 
 .monitor-name-text {
@@ -175,5 +176,68 @@
     .data-table td.col-type,
     .data-table td.col-status {
         display: none;
+    }
+}
+
+@media (max-width: 480px) {
+    .data-table th.col-added,
+    .data-table td.col-added {
+        display: none;
+    }
+    
+    .data-table th.col-up-down,
+    .data-table td.col-up-down {
+        width: 70px;
+    }
+    
+    .data-table th.col-check,
+    .data-table td.col-check {
+        width: 60px;
+    }
+    
+    .data-table th.col-name,
+    .data-table td.col-name {
+        min-width: 100px;
+    }
+    
+    .data-table th,
+    .data-table td {
+        padding: 0.5rem 0.35rem;
+        font-size: 0.75rem;
+    }
+    
+    .monitor-name-text {
+        font-size: 0.8rem;
+    }
+    
+    .monitor-sub-text {
+        font-size: 0.65rem;
+    }
+    
+    .type-badge,
+    .status-badge-inline {
+        padding: 2px 6px;
+        font-size: 0.65rem;
+    }
+    
+    .mini-uptime-bar {
+        display: none;
+    }
+    
+    .btn-action-icon {
+        width: 26px;
+        height: 26px;
+    }
+    
+    .btn-action-icon i {
+        font-size: 0.7rem;
+    }
+    
+    .monitors-table-container {
+        overflow-x: auto;
+    }
+    
+    .data-table {
+        min-width: 600px;
     }
 }

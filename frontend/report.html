@@ -10,11 +10,15 @@
     <link rel="icon" type="image/png" href="/static/images/favicon.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/logo.png">
     <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/public.css">
     <link rel="stylesheet" href="/static/css/report-page.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
 </head>
 
 <body>
@@ -363,24 +367,8 @@
     </div>
     </div>
 
+    <script src="/static/js/utils.js"></script>
     <script>
-        async function loadConfig() {
-            try {
-                const response = await fetch('/api/public/config');
-                if (response.ok) {
-                    const config = await response.json();
-                    if (config.logo_url) {
-                        const logoImg = document.getElementById('status-logo');
-                        if (logoImg) {
-                            logoImg.src = config.logo_url;
-                        }
-                    }
-                }
-            } catch (e) {
-                console.error('Failed to load config:', e);
-            }
-        }
-
         const urlParams = new URLSearchParams(window.location.search);
         const monitorId = urlParams.get('id');
         const rawTypeParam = (urlParams.get('type') || 'uptime').toLowerCase();
@@ -436,20 +424,6 @@
                 return `/api/public/monitor/heartbeat/server-agent/${monitorId}/history/months`;
             }
             return `/api/public/monitor/${monitorType}/${monitorId}/history/months`;
-        }
-
-        function withCacheBust(endpoint) {
-            try {
-                const url = new URL(endpoint, window.location.origin);
-                url.searchParams.set('_', Date.now().toString());
-                return url.toString();
-            } catch (e) {
-                return endpoint;
-            }
-        }
-
-        function fetchNoCache(endpoint, options = {}) {
-            return fetch(withCacheBust(endpoint), { ...options, cache: 'no-store' });
         }
 
         let cpuChart, ramChart, networkChart, diskChart;
@@ -621,47 +595,6 @@
             }
         }
 
-        function simplifyOsName(value) {
-            const raw = String(value || '').trim();
-            if (!raw) return '';
-
-            const lower = raw.toLowerCase();
-
-            if (lower.includes('windows 11')) return 'Windows 11';
-            if (lower.includes('windows 10')) return 'Windows 10';
-            if (lower.includes('windows server 2025')) return 'Windows Server 2025';
-            if (lower.includes('windows server 2022')) return 'Windows Server 2022';
-            if (lower.includes('windows server 2019')) return 'Windows Server 2019';
-            if (lower.includes('windows server 2016')) return 'Windows Server 2016';
-            if (lower.includes('windows server')) return 'Windows Server';
-            if (lower.includes('windows')) return 'Windows';
-            if (lower.includes('ubuntu')) return 'Ubuntu';
-            if (lower.includes('debian')) return 'Debian';
-            if (lower.includes('rocky')) return 'Rocky Linux';
-            if (lower.includes('almalinux')) return 'AlmaLinux';
-            if (lower.includes('centos')) return 'CentOS';
-            if (lower.includes('red hat') || lower.includes('rhel')) return 'RHEL';
-            if (lower.includes('amazon linux') || lower.includes('amzn')) return 'Amazon Linux';
-            if (lower.includes('fedora')) return 'Fedora';
-            if (lower.includes('opensuse')) return 'openSUSE';
-            if (lower.includes('suse')) return 'SUSE Linux';
-            if (lower.includes('linux mint')) return 'Linux Mint';
-            if (lower.includes('kali')) return 'Kali Linux';
-            if (lower.includes('arch')) return 'Arch Linux';
-            if (lower.includes('alpine')) return 'Alpine Linux';
-            if (lower.includes('gentoo')) return 'Gentoo';
-            if (lower.includes('darwin') || lower.includes('mac os') || lower.includes('macos')) return 'macOS';
-
-            const cleaned = raw
-                .replace(/\(.*?\)/g, ' ')
-                .replace(/gnu\/linux/ig, '')
-                .replace(/\s+/g, ' ')
-                .trim();
-            if (!cleaned) return raw;
-            const primary = cleaned.split(/[,:;/]/)[0].trim();
-            return primary || cleaned;
-        }
-
         async function fetchMonitorDetails() {
             const res = await fetchNoCache(getMonitorDetailsEndpoint());
             if (!res.ok) {
@@ -823,89 +756,6 @@
             } catch (e) {
                 handleMonitorLoadError(e, { showOverlay: true });
             }
-        }
-
-        function toTimestampMs(dateStr) {
-            if (!dateStr) return null;
-            let utcStr = String(dateStr);
-            if (!utcStr.endsWith('Z') && !utcStr.includes('+') && !utcStr.includes('-', 10)) {
-                utcStr += 'Z';
-            }
-            const date = new Date(utcStr);
-            const ms = date.getTime();
-            return Number.isFinite(ms) ? ms : null;
-        }
-
-        function formatDuration(dateStr) {
-            const ts = toTimestampMs(dateStr);
-            if (!Number.isFinite(ts) || ts <= 0) return 'Since --';
-            const diff = Math.max(0, Date.now() - ts);
-
-            const weeks = Math.floor(diff / (7 * 24 * 60 * 60 * 1000));
-            const days = Math.floor((diff % (7 * 24 * 60 * 60 * 1000)) / (24 * 60 * 60 * 1000));
-            const hours = Math.floor((diff % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
-            const minutes = Math.floor((diff % (60 * 60 * 1000)) / (60 * 1000));
-            const seconds = Math.floor((diff % (60 * 1000)) / 1000);
-
-            if (weeks > 0) {
-                return `Since ${weeks}w ${days}d ago`;
-            }
-            if (days > 0) {
-                return `Since ${days}d ago`;
-            }
-            if (hours > 0) {
-                return `Since ${hours}h ago`;
-            }
-            if (minutes > 0) {
-                return `Since ${minutes}m ago`;
-            }
-            return `Since ${Math.max(0, seconds)}s ago`;
-        }
-
-        function formatDate(dateStr) {
-            const ts = toTimestampMs(dateStr);
-            if (!Number.isFinite(ts) || ts <= 0) return '--';
-            const date = new Date(ts);
-            const day = date.getUTCDate();
-            const suffix = getDaySuffix(day);
-            const month = date.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
-            const year = date.getUTCFullYear();
-            return `${day}${suffix} of ${month} ${year}`;
-        }
-
-        function getDaySuffix(day) {
-            if (day >= 11 && day <= 13) return 'th';
-            switch (day % 10) {
-                case 1: return 'st';
-                case 2: return 'nd';
-                case 3: return 'rd';
-                default: return 'th';
-            }
-        }
-
-        function formatTimeAgo(dateStr) {
-            const ts = toTimestampMs(dateStr);
-            if (!Number.isFinite(ts) || ts <= 0) return '--';
-            const diff = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-
-            if (diff < 60) return diff + 'sec ago';
-            if (diff < 3600) return Math.floor(diff / 60) + 'min ago';
-            if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-            return Math.floor(diff / 86400) + 'd ago';
-        }
-
-        function getMonitorTypeLabel(type, heartbeatType = '', compact = false) {
-            const hbType = (heartbeatType || '').toLowerCase();
-            if (type === 'heartbeat') {
-                if (hbType === 'server_agent') {
-                    return compact ? 'Server Agent' : 'Heartbeat (Server Agent)';
-                }
-                return compact ? 'Heartbeat' : 'Heartbeat (Cronjob)';
-            }
-            if (type === 'uptime') {
-                return compact ? 'Website' : 'Website Monitor';
-            }
-            return type;
         }
 
         function updateUptimeStats(data) {

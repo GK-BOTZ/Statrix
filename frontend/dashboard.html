@@ -10,15 +10,21 @@
     <link rel="icon" type="image/png" href="/static/images/favicon.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/logo.png">
     <link rel="manifest" href="/manifest.webmanifest">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="/static/css/style.css">
     <link rel="stylesheet" href="/static/css/table-columns.css">
 
     <link rel="stylesheet" href="/static/css/sidebar-enhancements.css">
     <link rel="stylesheet" href="/static/css/pagination.css">
+    <link rel="stylesheet" href="/static/css/mobile-dashboard.css">
     <link rel="stylesheet" href="/static/css/statrix-style.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/static/css/delight.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
 </head>
 
 <body class="dashboard-body">
@@ -27,10 +33,10 @@
         <aside class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <div class="sidebar-logo">
-                    <img src="/static/images/logo.png" alt="Statrix" class="logo-img">
+                    <img src="/static/images/logo.png" alt="Statrix" class="logo-img" width="28" height="28">
                 </div>
                 <span class="brand-name">Statrix</span>
-                <button type="button" class="sidebar-toggle" id="sidebar-toggle" title="Toggle Sidebar">
+                <button type="button" class="sidebar-toggle" id="sidebar-toggle" title="Toggle Sidebar" aria-controls="sidebar" aria-expanded="false" aria-label="Toggle sidebar">
                     <i class="fas fa-bars"></i>
                 </button>
             </div>
@@ -72,11 +78,13 @@
             </div>
         </aside>
 
+        <button type="button" class="sidebar-overlay" id="sidebar-overlay" tabindex="-1" aria-label="Close navigation" aria-hidden="true"></button>
+
         <main class="dashboard-main">
 
             <header class="top-bar">
                 <div class="top-bar-left">
-                    <button type="button" class="mobile-menu-btn" id="mobile-menu-btn" title="Toggle menu">
+                    <button type="button" class="mobile-menu-btn" id="mobile-menu-btn" title="Toggle menu" aria-controls="sidebar" aria-expanded="false" aria-label="Open navigation">
                         <i class="fas fa-bars"></i>
                     </button>
                     <a href="#overview" class="top-bar-logo" data-tab="overview">
@@ -223,28 +231,30 @@
                             <div class="search-box">
                                 <input type="text" id="uptime-search" placeholder="Search..." onkeyup="filterMonitors('uptime')">
                             </div>
-                            <span class="ht-toolbar-separator">/</span>
-                            <button type="button" class="ht-toolbar-icon-btn" onclick="clearSearch('uptime')" title="Clear"><i class="fas fa-times"></i></button>
+                            <button type="button" class="ht-toolbar-icon-btn" onclick="clearSearch('uptime')" title="Clear" aria-label="Clear search"><i class="fas fa-times"></i></button>
                         </div>
                         <div class="ht-toolbar-right">
-
-                            <span class="ht-toolbar-label">Page</span>
-                            <button type="button" class="pagination-btn" onclick="paginationAction('uptime', 'prev')" title="Previous page"><i class="fas fa-angle-left"></i></button>
-                            <input type="number" class="pagination-input" id="uptime-page-input-top" value="1" min="1" onchange="goToPage('uptime', this.value)" title="Page number">
-                            <button type="button" class="pagination-btn" onclick="paginationAction('uptime', 'next')" title="Next page"><i class="fas fa-angle-right"></i></button>
-                            <span class="ht-toolbar-label">of <span id="uptime-total-pages-top">1</span> | View</span>
-                            <select class="pagination-select" onchange="changePerPage('uptime', this.value)" title="Monitors per page">
-                                <option value="10" selected>10</option>
-                                <option value="20">20</option>
-                                <option value="30">30</option>
-                                <option value="50">50</option>
-                                <option value="100">100</option>
-                                <option value="200">200</option>
-                                <option value="300">300</option>
-                            </select>
-                            <span class="ht-toolbar-label">monitors</span>
-                            <span class="ht-toolbar-separator">|</span>
-                            <span class="ht-toolbar-label" id="uptime-total">Total found: <strong>0</strong></span>
+                            <div class="ht-toolbar-page-controls">
+                                <span class="ht-toolbar-label">Page</span>
+                                <button type="button" class="pagination-btn" onclick="paginationAction('uptime', 'prev')" title="Previous page"><i class="fas fa-angle-left"></i></button>
+                                <input type="number" class="pagination-input" id="uptime-page-input-top" value="1" min="1" onchange="goToPage('uptime', this.value)" title="Page number">
+                                <button type="button" class="pagination-btn" onclick="paginationAction('uptime', 'next')" title="Next page"><i class="fas fa-angle-right"></i></button>
+                                <span class="ht-toolbar-label">of <span id="uptime-total-pages-top">1</span></span>
+                            </div>
+                            <div class="ht-toolbar-meta">
+                                <span class="ht-toolbar-label">View</span>
+                                <select class="pagination-select" onchange="changePerPage('uptime', this.value)" title="Monitors per page">
+                                    <option value="10" selected>10</option>
+                                    <option value="20">20</option>
+                                    <option value="30">30</option>
+                                    <option value="50">50</option>
+                                    <option value="100">100</option>
+                                    <option value="200">200</option>
+                                    <option value="300">300</option>
+                                </select>
+                                <span class="ht-toolbar-label">monitors</span>
+                                <span class="ht-toolbar-label" id="uptime-total">Total found: <strong>0</strong></span>
+                            </div>
                         </div>
                     </div>
 
@@ -339,7 +349,7 @@
                                 <span class="pagination-info">of <span id="uptime-total-pages">1</span></span>
                             </div>
                             <div class="pagination-right">
-                                <span class="pagination-label">| View</span>
+                                <span class="pagination-label">View</span>
                                 <select class="pagination-select" onchange="changePerPage('uptime', this.value)" title="Monitors per page">
                                     <option value="10">10</option>
                                     <option value="20" selected>20</option>
@@ -707,13 +717,14 @@
 
     <div class="modal-overlay" id="modal-overlay">
         <div class="modal" id="modal-container">
-            <button type="button" class="modal-close" onclick="hideModal()" title="Close">×</button>
+            <button type="button" class="modal-close" style="right: 0.75rem !important; left: auto !important; position: absolute !important;" onclick="hideModal()" title="Close" aria-label="Close">×</button>
             <div id="modal-content"></div>
         </div>
     </div>
 
-    <script src="/static/js/dashboard.js"></script>
-    <script src="/static/js/statrix-functions.js"></script>
+    <script src="/static/js/utils.js" defer></script>
+    <script src="/static/js/dashboard.js" defer></script>
+    <script src="/static/js/statrix-functions.js" defer></script>
 </body>
 
 </html>

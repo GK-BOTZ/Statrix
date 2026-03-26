@@ -10,10 +10,14 @@
     <link rel="icon" type="image/png" href="/static/images/favicon.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/logo.png">
     <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/public.css">
     <link rel="stylesheet" href="/static/css/status-page.css">
+    <link rel="stylesheet" href="/static/css/delight.css">
 </head>
 
 <body>
@@ -109,6 +113,7 @@
         </div>
     </div>
 
+    <script src="/static/js/utils.js"></script>
     <script>
         const CONFIG = {
             refreshInterval: 60,
@@ -126,6 +131,21 @@
         let _statusConsecutiveFailures = 0;
         let _lastSuccessfulStatusPayload = null;
 
+        const _loadingMessages = [
+            'Pinging the servers...',
+            'Checking all systems...',
+            'Counting green dots...',
+            'Herding packets...',
+            'Asking the servers how they feel...',
+            'Measuring uptime vibes...',
+            'Consulting the network gods...',
+            'Waking up the monitors...',
+        ];
+
+        function randomLoadingMessage() {
+            return _loadingMessages[Math.floor(Math.random() * _loadingMessages.length)];
+        }
+
         const DOM = {
             searchInput: document.getElementById('search-input'),
             monitorsContainer: document.getElementById('monitors-container'),
@@ -139,75 +159,10 @@
             statusWarningBanner: document.getElementById('status-warning-banner')
         };
 
-        function withCacheBust(endpoint) {
-            try {
-                const url = new URL(endpoint, window.location.origin);
-                url.searchParams.set('_', Date.now().toString());
-                return url.toString();
-            } catch (e) {
-                return endpoint;
-            }
-        }
-
-        function fetchNoCache(endpoint, options = {}) {
-            return fetch(withCacheBust(endpoint), { ...options, cache: 'no-store' });
-        }
-
         function syncCountdownDisplays(value) {
             document.querySelectorAll('.date-display .number').forEach((el) => {
                 el.textContent = String(value);
             });
-        }
-
-        async function loadConfig() {
-            try {
-                const response = await fetch('/api/public/config');
-                if (response.ok) {
-                    const config = await response.json();
-                    if (config.logo_url) {
-                        const logoImg = document.querySelector('.logo-header img');
-                        if (logoImg) {
-                            logoImg.src = config.logo_url;
-                        }
-                    }
-                    if (config.status_page_title) {
-                        document.title = config.status_page_title;
-                        const pageTitleEl = document.getElementById('page-title');
-                        if (pageTitleEl) {
-                            pageTitleEl.textContent = config.status_page_title;
-                        }
-                    }
-                }
-            } catch (e) {
-                console.error('Failed to load config:', e);
-            }
-        }
-
-        function normalizeBool(value) {
-            if (value === true || value === false) return value;
-            if (value === 1 || value === 0) return value === 1;
-            if (typeof value === 'string') {
-                const v = value.trim().toLowerCase();
-                if (['true', '1', 'yes', 'y', 't'].includes(v)) return true;
-                if (['false', '0', 'no', 'n', 'f', ''].includes(v)) return false;
-            }
-            return Boolean(value);
-        }
-
-        function escapeHtml(value) {
-            return String(value ?? '')
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&#39;');
-        }
-
-        function formatIncidentTimestamp(value) {
-            if (!value) return '--';
-            const date = new Date(value);
-            if (Number.isNaN(date.getTime())) return '--';
-            return date.toLocaleString();
         }
 
         function getIncidentSeverityClass(type) {
@@ -354,7 +309,7 @@
             DOM.btnNewerBottom.disabled = isAtCurrent;
 
             DOM.monitorsContainer.innerHTML =
-                '<div class="loading"><i class="fas fa-spinner fa-spin"></i> Loading...</div>';
+                `<div class="loading"><i class="fas fa-spinner fa-spin"></i> ${randomLoadingMessage()}</div>`;
 
             _navLoading = true;
             loadStatus().finally(() => { _navLoading = false; });
@@ -408,7 +363,7 @@
             const container = DOM.monitorsContainer;
 
             if (!monitors || monitors.length === 0) {
-                container.innerHTML = '<div class="loading">No monitors configured</div>';
+                container.innerHTML = '<div class="loading">No monitors yet. Your dashboard awaits its first heartbeat.</div>';
                 return;
             }
 
@@ -647,12 +602,13 @@
                 if (customTooltip) {
                     tooltip = customTooltip;
                 }
-                historyHtml += `<div class="status-dot ${dotClass}" ${tooltip ? `title="${tooltip}"` : ''}><i class="fas fa-${dotIcon}"></i></div>`;
+                historyHtml += `<div class="status-dot ${dotClass}" ${tooltip ? `title="${escapeHtml(tooltip)}"` : ''}><i class="fas fa-${dotIcon}"></i></div>`;
             }
 
+            const safeName = escapeHtml(m.name);
             const nameDisplay = isPublic
-                ? `<a href="${reportUrl}">${m.name}</a>`
-                : `<span class="text-white">${m.name}</span>`;
+                ? `<a href="${reportUrl}">${safeName}</a>`
+                : `<span class="text-white">${safeName}</span>`;
             const uptimeLabel = uptimeValue !== null ? `${uptimeValue}%` : '--';
             const uptimeDisplay = (isPublic && uptimeValue !== null)
                 ? `<a href="${reportUrl}">${uptimeLabel}</a>`
@@ -761,7 +717,7 @@
                 dailyStatusCells += `
                     <td class="daily-col">
                         <div class="daily-status">
-                            <div class="status-dot ${dotClass}" title="${tooltip}">
+                            <div class="status-dot ${dotClass}" title="${escapeHtml(tooltip)}">
                                 <i class="fas fa-${dotIcon}"></i>
                             </div>
                         </div>
@@ -769,9 +725,10 @@
                 `;
             }
 
+            const safeName = escapeHtml(m.name);
             const nameDisplay = isPublic
-                ? `<a href="${reportUrl}"><strong>${m.name}</strong></a>`
-                : `<span class="text-white"><strong>${m.name}</strong></span>`;
+                ? `<a href="${reportUrl}"><strong>${safeName}</strong></a>`
+                : `<span class="text-white"><strong>${safeName}</strong></span>`;
             const uptimeLabel = uptimeValue !== null ? `${uptimeValue}%` : '--';
             const uptimeDisplay = (isPublic && uptimeValue !== null)
                 ? `<a href="${reportUrl}">${uptimeLabel}</a>`
@@ -845,7 +802,7 @@
                         DOM.overallUptime.textContent = '--%';
                         renderStatusIncidents(data.status_incidents || []);
                         DOM.monitorsContainer.innerHTML =
-                            '<div class="loading"><i class="fas fa-spinner fa-spin"></i> Initializing status cache...</div>';
+                            `<div class="loading"><i class="fas fa-spinner fa-spin"></i> ${randomLoadingMessage()}</div>`;
                         showStatusWarning('Status cache is initializing. Retrying automatically...');
                     }
                     scheduleStatusRetry(1500);
@@ -881,8 +838,8 @@
                 } else {
                     renderStatusIncidents([]);
                     DOM.monitorsContainer.innerHTML =
-                        '<div class="loading loading-error"><i class="fas fa-exclamation-triangle"></i> Unable to load status</div>';
-                    showStatusWarning('Unable to reach status API. Retrying automatically...');
+                        '<div class="loading loading-error"><i class="fas fa-exclamation-triangle"></i> Couldn\'t reach the status API. Retrying shortly...</div>';
+                    showStatusWarning('Looks like the connection took a detour. Retrying automatically...');
                 }
             } finally {
                 if (requestTimeout) clearTimeout(requestTimeout);
